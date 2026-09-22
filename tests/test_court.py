@@ -96,3 +96,43 @@ def test_residuals_reported():
     cal = court.calibrate(pts, 1920, 1080)
     r = {x["name"]: x for x in cal["residuals"]}
     assert len(r) == 5 and r["centre"]["px_err"] == max(x["px_err"] for x in r.values()) and r["centre"]["px_err"] > 20
+
+
+def test_distort_inverse_is_robust_everywhere():
+    import numpy as np
+    w, h = 3840, 2160
+    f = 0.5 * (w * w + h * h) ** 0.5
+    for k1, k2 in ((-0.1, 0), (-0.3, 0), (-0.5, 0.1), (-0.3, 0.05), (0.2, 0)):
+        dist = {"cx": w / 2 + 100, "cy": h / 2 - 50, "k1": k1, "k2": k2, "f": f}
+        for pt in [(95.2, 1689.0), (3651.9, 1381.3), (1920, 1080), (400, 600), (10, 10), (3830, 2150)]:
+            r = np.hypot(pt[0] - dist["cx"], pt[1] - dist["cy"]) / f
+            if 1 + 3 * k1 * r * r + 5 * k2 * r ** 4 <= 0.05:
+                continue  # beyond the fold: not invertible by construction
+            u = court._undistort_pts([pt], dist)[0]
+            back = court._distort_pt(u[0], u[1], dist)
+            assert np.hypot(back[0] - pt[0], back[1] - pt[1]) < 0.05, (k1, k2, pt)
+
+
+def test_fit_keeps_model_invertible_over_frame():
+    """Strong synthetic fisheye on a 4K frame with points near the edges: fitted model must stay monotonic."""
+    import numpy as np
+    W, Hh = 3840, 2160
+    Hm = synthetic_H()
+    Hm = np.diag([2.0, 2.0, 1.0]) @ Hm   # scale synthetic camera to 4K
+    f = 0.5 * (W * W + Hh * Hh) ** 0.5
+    true = {"cx": 1900.0, "cy": 1100.0, "k1": -0.28, "k2": 0.04, "f": f}
+    pts = []
+    for n, (x, y) in court.LANDMARKS.items():
+        v = Hm @ [x, y, 1]
+        dx, dy = court._distort_pt(v[0] / v[2], v[1] / v[2], true)
+        if 0 <= dx <= W and 0 <= dy <= Hh:
+            pts.append({"name": n, "px": dx, "py": dy})
+    assert len(pts) >= 10
+    cal = court.calibrate(pts, W, Hh)
+    assert cal["dist"] is not None and cal["error_m"] < 0.05
+    d = cal["dist"]
+    r_max = ((0.7 * W) ** 2 + (0.7 * Hh) ** 2) ** 0.5 / f
+    rr = np.linspace(0, r_max, 50)
+    assert np.all(1 + 3 * d["k1"] * rr ** 2 + 5 * d["k2"] * rr ** 4 > 0.1)
+    # clicked corners reproject close to where they were clicked
+    assert max(r["px_err"] for r in cal["residuals"]) < 3

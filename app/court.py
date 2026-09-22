@@ -54,18 +54,36 @@ def _undistort_pts(pts, dist):
     return [cx, cy] + d * fac[:, None]
 
 
-def _distort_pt(x, y, dist, iters=8):
-    """Inverse of _undistort_pts for one point (fixed-point iteration)."""
+def _distort_pt(x, y, dist):
+    """Inverse of _undistort_pts for one point: solve r_d (1 + k1 r_d^2 + k2 r_d^4) = r_u for r_d.
+    Bisection on [0, r_hi] where the model is still increasing, so it never diverges; if r_u lies
+    beyond the model's reach (fold-over) the point is clamped to the fold radius."""
     if not dist:
         return x, y
     cx, cy, k1, k2, f = dist["cx"], dist["cy"], dist["k1"], dist["k2"], dist["f"]
-    ux, uy = x - cx, y - cy
-    dx, dy = ux, uy
-    for _ in range(iters):
-        r2 = (dx * dx + dy * dy) / (f * f)
-        fac = 1 + k1 * r2 + k2 * r2 * r2
-        dx, dy = ux / fac, uy / fac
-    return cx + dx, cy + dy
+    ux, uy = (x - cx) / f, (y - cy) / f
+    ru = (ux * ux + uy * uy) ** 0.5
+    if ru < 1e-12:
+        return x, y
+    g = lambda r: r * (1 + k1 * r * r + k2 * r ** 4)  # noqa: E731
+    dg = lambda r: 1 + 3 * k1 * r * r + 5 * k2 * r ** 4  # noqa: E731
+    # find the end of the increasing branch
+    r_hi, step = 0.0, 0.02
+    while r_hi < 4.0 and dg(r_hi + step) > 0:
+        r_hi += step
+    if g(r_hi) <= ru:  # out of reach: clamp
+        rd = r_hi
+    else:
+        lo, hi = 0.0, r_hi
+        for _ in range(60):
+            mid = 0.5 * (lo + hi)
+            if g(mid) < ru:
+                lo = mid
+            else:
+                hi = mid
+        rd = 0.5 * (lo + hi)
+    s_ = rd / ru
+    return cx + ux * s_ * f, cy + uy * s_ * f
 
 
 def _fit(src, dst, w, h, fit_distortion: bool):
@@ -93,19 +111,27 @@ def _fit(src, dst, w, h, fit_distortion: bool):
 
     from scipy.optimize import least_squares
 
+    # farthest possible normalised radius in the image (corner from a centre within the bounds)
+    r_max = ((0.7 * w) ** 2 + (0.7 * h) ** 2) ** 0.5 / f
+    rr = np.linspace(0, r_max, 40)
+
     def residuals(x):
-        dist = {"cx": x[0], "cy": x[1], "k1": x[2], "k2": x[3] if fit_k2 else 0.0, "f": f}
+        k1, k2 = x[2], x[3] if fit_k2 else 0.0
+        dist = {"cx": x[0], "cy": x[1], "k1": k1, "k2": k2, "f": f}
         u = _undistort_pts(src_a, dist)
         H = solve_H(u)
         if H is None:
-            return np.full(len(src) * 2, 1e3)
+            return np.full(len(src) * 2 + len(rr), 1e3)
         v = (H @ np.c_[u, np.ones(len(u))].T).T
         proj = v[:, :2] / v[:, 2:3]
-        return (proj - dst_a).ravel()
+        # penalty: d/dr [r(1 + k1 r^2 + k2 r^4)] must stay > 0.2 over the whole frame (invertible, physical)
+        dg = 1 + 3 * k1 * rr ** 2 + 5 * k2 * rr ** 4
+        pen = np.maximum(0.0, 0.2 - dg) * 50.0
+        return np.concatenate([(proj - dst_a).ravel(), pen])
 
     x0 = np.array([w / 2, h / 2, 0.0, 0.0])
-    lo = [w * 0.3, h * 0.3, -1.0, -1.0 if fit_k2 else -1e-9]
-    hi = [w * 0.7, h * 0.7, 1.0, 1.0 if fit_k2 else 1e-9]
+    lo = [w * 0.3, h * 0.3, -0.6, -0.5 if fit_k2 else -1e-9]
+    hi = [w * 0.7, h * 0.7, 0.6, 0.5 if fit_k2 else 1e-9]
     res = least_squares(residuals, x0, bounds=(lo, hi), x_scale=[w * 0.1, h * 0.1, 0.1, 0.1])
     dist = {"cx": float(res.x[0]), "cy": float(res.x[1]), "k1": float(res.x[2]), "k2": float(res.x[3]) if fit_k2 else 0.0, "f": f}
     u = _undistort_pts(src_a, dist)
