@@ -231,7 +231,7 @@ def set_calibration(match_id: int, c: CalibIn):
 
 @app.get("/api/match/{match_id}/frame")
 def frame_at(match_id: int, t: float = Query(...), width: int = 1280):
-    """JPEG of the local video at time t (for clicking landmarks)."""
+    """JPEG of the local video at time t (for clicking landmarks). width=0 -> full resolution."""
     import cv2
     from fastapi.responses import Response
     pr = project(match_id)
@@ -247,7 +247,7 @@ def frame_at(match_id: int, t: float = Query(...), width: int = 1280):
     h, w = fr.shape[:2]
     if width and w > width:
         fr = cv2.resize(fr, (width, int(h * width / w)))
-    ok, buf = cv2.imencode(".jpg", fr, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    ok, buf = cv2.imencode(".jpg", fr, [cv2.IMWRITE_JPEG_QUALITY, 92])
     return Response(buf.tobytes(), media_type="image/jpeg", headers={"X-Source-Width": str(w), "X-Source-Height": str(h)})
 
 

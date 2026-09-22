@@ -106,17 +106,34 @@ const check = (name, cond, detail = "") => { console.log(`${cond ? "PASS" : "FAI
     check("court canvas visible", await ev("document.getElementById('court2d').offsetHeight > 0"));
     check("tracking status shows data", await waitFor("/available|done/.test(document.getElementById('track-status').textContent)"));
     check("landmark list populated", await ev("document.getElementById('lm-select').options.length") >= 20);
-    await ev("document.getElementById('calib').open = true; P.time = () => 30; document.getElementById('btn-frame').click()");
-    check("frame grabbed", await waitFor("document.getElementById('calib-img').naturalWidth > 0", 15000));
-    // click 5 landmarks at chosen positions (a plausible perspective quadrilateral)
-    const clicks = [["corner_L_top", 0.245, 0.454], ["corner_R_top", 0.812, 0.424], ["corner_L_bottom", 0.05, 0.85], ["corner_R_bottom", 0.97, 0.88], ["centre", 0.55, 0.62]];
-    for (const [name, fx, fy] of clicks) {
-      await ev(`(()=>{const img=document.getElementById('calib-img'); const r=img.getBoundingClientRect(); document.getElementById('lm-select').value='${name}'; img.dispatchEvent(new MouseEvent('click',{clientX:r.left+r.width*${fx}, clientY:r.top+r.height*${fy}, bubbles:true}));})()`);
+    await ev("calibPts = []; document.getElementById('calib').open = true; P.time = () => 30; document.getElementById('btn-frame').click()");
+    check("fullscreen calibrator opens with full-res frame", await waitFor("!document.getElementById('calib-full').classList.contains('hidden') && CF.img && CF.img.width === 1920", 15000));
+    check("frame fitted to screen", await ev("Math.abs(CF.scale - CF.fit) < 1e-9 && CF.fit < 1"));
+    // zoom in 3 steps around a point, then pan
+    await ev("(()=>{const cv=document.getElementById('cf-canvas'); const r=cv.getBoundingClientRect(); for(let i=0;i<3;i++) cv.dispatchEvent(new WheelEvent('wheel',{deltaY:-100, clientX:r.left+r.width*0.3, clientY:r.top+r.height*0.5, bubbles:true, cancelable:true}));})()");
+    check("wheel zooms in", Math.abs(await ev("CF.scale / CF.fit") - 1.25 ** 3) < 1e-6, await ev("CF.scale / CF.fit"));
+    const before = await ev("[CF.ox, CF.oy]");
+    await ev("(()=>{const cv=document.getElementById('cf-canvas'); const r=cv.getBoundingClientRect(); cv.dispatchEvent(new MouseEvent('mousedown',{clientX:r.left+200, clientY:r.top+200, bubbles:true})); cv.dispatchEvent(new MouseEvent('mousemove',{clientX:r.left+260, clientY:r.top+230, bubbles:true})); cv.dispatchEvent(new MouseEvent('mouseup',{clientX:r.left+260, clientY:r.top+230, bubbles:true}));})()");
+    const after = await ev("[CF.ox, CF.oy]");
+    check("drag pans", Math.round(after[0] - before[0]) === 60 && Math.round(after[1] - before[1]) === 30, JSON.stringify([before, after]));
+    check("drag does not place a point", await ev("calibPts.length") === 0, await ev("JSON.stringify(calibPts)"));
+    // click landmarks: choose image-space targets, convert to screen coords via the current view
+    const clicks = [["corner_L_top", 470, 490], ["corner_R_top", 1560, 458], ["corner_L_bottom", 96, 918], ["corner_R_bottom", 1862, 950], ["centre", 1056, 670]];
+    for (const [name, ix, iy] of clicks) {
+      await ev(`(()=>{const cv=document.getElementById('cf-canvas'); const r=cv.getBoundingClientRect(); document.getElementById('lm-select').value='${name}';
+        cfFit(); CF.scale = CF.fit*4; CF.ox = cv.width/2 - ${ix}*CF.scale; CF.oy = cv.height/2 - ${iy}*CF.scale; drawCalib();
+        const x=r.left+CF.ox+${ix}*CF.scale, y=r.top+CF.oy+${iy}*CF.scale;
+        cv.dispatchEvent(new MouseEvent('mousedown',{clientX:x, clientY:y, bubbles:true})); cv.dispatchEvent(new MouseEvent('mouseup',{clientX:x, clientY:y, bubbles:true}));})()`);
     }
     check("5 calibration points listed", await ev("calibPts.length") === 5, await ev("calibPts.length"));
-    check("clicked px scaled to source resolution", await ev("calibPts.find(p=>p.name==='corner_R_bottom').px") > 1700);
-    await ev("document.getElementById('btn-calib-save').click()");
-    check("calibration saved", await waitFor("S.data.calibration && S.data.calibration.H"));
+    const cRB = await ev("calibPts.find(p=>p.name==='corner_R_bottom')");
+    check("click at zoom maps to exact image pixel", Math.abs(cRB.px - 1862) < 0.6 && Math.abs(cRB.py - 950) < 0.6, JSON.stringify(cRB));
+    check("points listed in fullscreen bar too", await ev("document.getElementById('cf-pts').textContent.includes('corner_R_bottom')"));
+    await ev("document.getElementById('cf-save').click()");
+    check("save from fullscreen works", await waitFor("S.data.calibration && S.data.calibration.H"));
+    check("court outline drawn after calibration (green pixels on canvas)", await ev("(()=>{drawCalib(); const c=document.getElementById('cf-canvas'); const d=c.getContext('2d').getImageData(0,0,c.width,c.height).data; let n=0; for(let i=0;i<d.length;i+=4) if(d[i+1]>150 && d[i]<100 && d[i+2]<150) n++; return n;})()") > 100);
+    await ev("document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape', bubbles:true}))");
+    check("Esc closes calibrator", await ev("document.getElementById('calib-full').classList.contains('hidden')"));
     check("calibration status shown", await ev("document.getElementById('calib-status').textContent").then(t => /calibrated \(5 pts/.test(t)));
     await ev("P.time = () => 31.0"); await sleep(1500);
     await ev("TRK = { frames: [], t0: null, t1: null }; ensureTracks(31.0)"); await sleep(1000); await ev("drawCourt(31.0)");
