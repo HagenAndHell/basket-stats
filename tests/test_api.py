@@ -108,5 +108,8 @@ def test_calibration_uses_given_frame_size(client):
     pts = [{"name": a, "px": float(b), "py": float(c)} for a, b, c in (l.split() for l in USER_POINTS_4K.splitlines())]
     r = client.post("/api/match/8439241/calibration", json={"points": pts, "width": 3840, "height": 2160}).json()
     assert r["width"] == 3840 and r["error_m"] < 0.15 and r["dist"]["k1"] < -0.3
+    # a wrong/stale frame size that cannot contain the points is corrected automatically (this was the bug)
     r2 = client.post("/api/match/8439241/calibration", json={"points": pts, "width": 1920, "height": 1080}).json()
-    assert r2["error_m"] > r["error_m"]  # wrong frame size gives a worse fit (this was the bug)
+    assert r2["width"] == 3840 and r2["error_m"] == pytest.approx(r["error_m"])
+    r3 = client.post("/api/match/8439241/calibration", json={"points": pts}).json()
+    assert r3["width"] == 3840

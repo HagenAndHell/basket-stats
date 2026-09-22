@@ -228,13 +228,22 @@ def set_calibration(match_id: int, c: CalibIn):
     v = pr.data.get("video") or {}
     w, h = c.width, c.height
     if not w or not h:
-        # fall back to the actual local file, never to a stale record
-        local = v.get("local")
-        if local and Path(local).is_file():
-            pv = video.probe(local)
-            w, h = pv["width"], pv["height"]
+        fs = pr.data.get("frame_size")
+        if fs:
+            w, h = fs
         else:
-            w, h = int(v.get("width") or 1920), int(v.get("height") or 1080)
+            # fall back to the actual local file, never to a stale record
+            local = v.get("local")
+            if local and Path(local).is_file():
+                pv = video.probe(local)
+                w, h = pv["width"], pv["height"]
+            else:
+                w, h = int(v.get("width") or 1920), int(v.get("height") or 1080)
+    # sanity: clicked points must fit inside the frame; if not, the size is wrong -> grow to the points' extent
+    max_x = max((p.get("px", 0) for p in c.points), default=0)
+    max_y = max((p.get("py", 0) for p in c.points), default=0)
+    if max_x > w or max_y > h:
+        w, h = (3840, 2160) if max_x <= 3840 and max_y <= 2160 else (int(max_x * 1.05), int(max_y * 1.05))
     cal = court.calibrate(c.points, int(w), int(h), c.fit_distortion)
     pr.data["calibration"] = {"points": c.points, "H": None, "dist": None, "error_m": None, "error_plain_m": None, **(cal or {})}
     pr.save()
@@ -268,6 +277,8 @@ def frame_at(match_id: int, t: float = Query(...), width: int = 1280):
     if not ok:
         raise HTTPException(404, "no frame")
     h, w = fr.shape[:2]
+    pr.data["frame_size"] = [w, h]  # what the calibrator clicked on
+    pr.save()
     if width and w > width:
         fr = cv2.resize(fr, (width, int(h * width / w)))
     ok, buf = cv2.imencode(".jpg", fr, [cv2.IMWRITE_JPEG_QUALITY, 92])

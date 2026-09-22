@@ -358,7 +358,7 @@ function drawCalib() {
 $("btn-calib-clear").onclick = () => { calibPts = []; drawCalib(); };
 $("btn-calib-save").onclick = async () => {
   try { S.data.calibration = await post(`match/${S.matchId}/calibration`, { points: calibPts, width: calibSrc?.w || S.data.calibration?.width, height: calibSrc?.h || S.data.calibration?.height }); renderCalibStatus(); loadOutline();
-    const c = S.data.calibration; toast(c.H ? (c.dist ? `calibrated with lens correction: error ${c.error_m.toFixed(2)} m (was ${c.error_plain_m.toFixed(2)} m without)` : `calibrated, error ${c.error_m.toFixed(2)} m${calibPts.length < 6 ? " — add 6+ points to fit lens distortion" : ""}`) : "need 4+ points"); } catch (e) { toast(e.message); }
+    const c = S.data.calibration; if (c.width && calibSrc && (c.width !== calibSrc.w || c.height !== calibSrc.h)) toast(`WARNING: fit used ${c.width}×${c.height} but frame is ${calibSrc.w}×${calibSrc.h}`); else toast(c.H ? (c.dist ? `calibrated with lens correction: error ${c.error_m.toFixed(2)} m (was ${c.error_plain_m.toFixed(2)} m without)` : `calibrated, error ${c.error_m.toFixed(2)} m${calibPts.length < 6 ? " — add 6+ points to fit lens distortion" : ""}`) : "need 4+ points"); } catch (e) { toast(e.message); }
 };
 function renderCalibStatus() { const c = S.data.calibration; $("calib-status").textContent = c?.H ? `calibrated (${c.points.length} pts, err ${c.error_m.toFixed(2)} m${c.dist ? `, lens k1=${c.dist.k1.toFixed(3)}` : ", no lens correction"}, frame ${c.width}×${c.height})` : "not calibrated"; if (c?.points) calibPts = c.points.slice(); }
 function homographyFromPts() { return S.data?.calibration?.H || null; }   // server computes; we only draw using the saved one
