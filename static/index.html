@@ -28,6 +28,7 @@
   td.n, th.n { text-align:right; font-variant-numeric:tabular-nums; }
   tr.ev { cursor:pointer; } tr.ev:hover { background:#1f2430; } tr.ev.cur { background:#233524; }
   tr.ev.nosync { opacity:.55; }
+  tr.ev.sel td { box-shadow: inset 3px 0 0 var(--accent); }
   .pill { display:inline-block; padding:1px 6px; border-radius:10px; font-size:11px; border:1px solid var(--line); }
   .kbd { font:12px ui-monospace, monospace; background:#0b0d12; border:1px solid var(--line); border-radius:4px; padding:0 5px; }
   #sync-list .a { display:inline-block; margin:2px 6px 2px 0; padding:2px 6px; border:1px solid var(--line); border-radius:6px; font-size:12px; }
@@ -73,7 +74,7 @@
         <select id="sync-period"></select>
         <label>clock <input id="sync-clock" size="6" placeholder="0:00" value="0:00"></label>
         <button id="btn-anchor" class="primary">Set anchor at current video time</button>
-        <span class="muted">Tip: anchor the period start (0:00) and end (10:00); add more where the clock stopped for long.</span>
+        <span class="muted">Tip: anchor the period start (0:00), then fix drift by clicking an event, scrubbing to the real moment and pressing its <b>here</b> button (or <span class="kbd">M</span>) — every fix becomes an anchor and re-times the events around it.</span>
       </div>
       <div id="sync-list" style="margin-top:6px"></div>
     </div>
@@ -84,7 +85,7 @@
         <select id="tag-team"></select>
         <select id="tag-player"></select>
         <span class="stat-btns row" id="stat-btns"></span>
-        <span class="muted">Keys: <span class="kbd">O</span>OR <span class="kbd">D</span>DR <span class="kbd">A</span>Ast <span class="kbd">S</span>Stl <span class="kbd">T</span>TO <span class="kbd">B</span>Blk <span class="kbd">2</span>/<span class="kbd">3</span> miss <span class="kbd">I</span>in <span class="kbd">U</span>out <span class="kbd">Space</span> play <span class="kbd">←/→</span> ±2s</span>
+        <span class="muted">Keys: <span class="kbd">O</span>OR <span class="kbd">D</span>DR <span class="kbd">A</span>Ast <span class="kbd">S</span>Stl <span class="kbd">T</span>TO <span class="kbd">B</span>Blk <span class="kbd">2</span>/<span class="kbd">3</span> miss <span class="kbd">I</span>in <span class="kbd">U</span>out <span class="kbd">M</span> sync selected event here <span class="kbd">Space</span> play <span class="kbd">←/→</span> ±2s</span>
       </div>
     </div>
   </div>
@@ -102,7 +103,7 @@
         <select id="f-kind"><option value="">All events</option><option value="shot">Shots</option><option value="made">Made shots</option><option value="foul">Fouls</option><option value="tag">Tags</option></select>
         <label><input type="checkbox" id="f-follow" checked> follow</label>
       </div>
-      <div class="scroll" id="tab-events"><table><thead><tr><th>Q</th><th>Clock</th><th>Team</th><th>Event</th><th>Player</th><th class="n">Score</th><th>Video</th></tr></thead><tbody id="ev-body"></tbody></table></div>
+      <div class="scroll" id="tab-events"><table><thead><tr><th>Q</th><th>Clock</th><th>Team</th><th>Event</th><th>Player</th><th class="n">Score</th><th>Video</th><th title="Anchor this event at the current video time">Sync</th></tr></thead><tbody id="ev-body"></tbody></table></div>
       <div class="scroll hidden" id="tab-box"></div>
       <div class="scroll hidden" id="tab-tags"><table><thead><tr><th>Q</th><th>Clock</th><th>Team</th><th>Stat</th><th>Player</th><th>Video</th><th></th></tr></thead><tbody id="tag-body"></tbody></table></div>
     </div>
@@ -163,7 +164,12 @@ async function loadMatch(id) {
 function players(team) { return S.data.feed.players.filter(p => !team || p.team === team).sort((a,b) => (+a.no||999) - (+b.no||999)); }
 function fillTagPlayers() { $("tag-player").innerHTML = players($("tag-team").value).map(p => `<option value="${p.personId}">#${esc(p.no)} ${esc(p.name)}</option>`).join(""); }
 function fillFilterPlayers() { $("f-player").innerHTML = '<option value="">All players</option>' + ["home","away"].flatMap(t => players(t).map(p => `<option value="${p.personId}">${t === "home" ? "H" : "A"} #${esc(p.no)} ${esc(p.name)}</option>`)).join(""); }
-async function refreshEvents() { S.events = await api(`match/${S.matchId}/events`); renderEvents(); }
+async function refreshEvents() {
+  S.events = await api(`match/${S.matchId}/events`);
+  const sync = S.data.sync || {};
+  for (const e of S.events) e.anchored = (sync[e.period] || []).some(a => Math.abs(a.clock - e.clock) < 0.5);
+  renderEvents();
+}
 
 // ---------- events table
 function allRows() {
@@ -178,10 +184,24 @@ function renderEvents() {
   $("ev-body").innerHTML = rows.map(e => `<tr class="ev ${e.video == null ? "nosync" : ""}" data-video="${e.video ?? ""}" data-id="${e.id}">
     <td>${e.period ? "Q" + e.period : ""}</td><td>${esc(e.clockStr)}</td><td class="${e.team}">${e.team === "home" ? "H" : e.team === "away" ? "A" : ""}</td>
     <td>${esc(e.label)}${e.kind === "tag" ? ' <span class="pill">tag</span>' : ""}</td><td>${e.playerNo !== "" && e.playerNo != null ? "#" + esc(e.playerNo) + " " : ""}${esc(e.playerName || "")}</td>
-    <td class="n">${e.score ? e.score[0] + "–" + e.score[1] : ""}</td><td class="muted">${e.video != null ? fmt(e.video) : "not synced"}</td></tr>`).join("");
-  $("ev-body").querySelectorAll("tr.ev").forEach(tr => tr.onclick = () => { const v = tr.dataset.video; if (v !== "") P.seek(+v - 5); });
+    <td class="n">${e.score ? e.score[0] + "–" + e.score[1] : ""}</td><td class="muted">${e.video != null ? fmt(e.video) : "not synced"}</td>
+    <td>${e.kind !== "tag" && e.period ? `<button class="small mark" data-period="${e.period}" data-clock="${e.clock}" title="This event happens at the current video time (key M for the selected event)">${e.anchored ? "✓" : "here"}</button>` : ""}</td></tr>`).join("");
+  $("ev-body").querySelectorAll("tr.ev").forEach(tr => tr.onclick = ev => { if (ev.target.classList.contains("mark")) return; selectRow(tr); const v = tr.dataset.video; if (v !== "") P.seek(+v - 5); });
+  $("ev-body").querySelectorAll("button.mark").forEach(b => b.onclick = () => markHere(+b.dataset.period, +b.dataset.clock));
+  if (S.selectedId) { const tr = $("ev-body").querySelector(`tr[data-id="${S.selectedId}"]`); if (tr) tr.classList.add("sel"); }
 }
 ["f-team","f-player","f-kind"].forEach(id => $(id).onchange = renderEvents);
+
+function selectRow(tr) { $("ev-body").querySelectorAll("tr.sel").forEach(x => x.classList.remove("sel")); tr.classList.add("sel"); S.selectedId = tr.dataset.id; }
+async function markHere(period, clock) {
+  S.data.sync = await post(`match/${S.matchId}/sync`, { period, clock, video: P.time() });
+  renderSync(); await refreshEvents(); toast(`Q${period} ${fmtc(clock)} anchored at ${fmt(P.time())}`);
+}
+function markSelected() {
+  const tr = S.selectedId && $("ev-body").querySelector(`tr[data-id="${S.selectedId}"] button.mark`);
+  if (!tr) return toast("click an event first, then press M at the right moment");
+  markHere(+tr.dataset.period, +tr.dataset.clock);
+}
 
 // ---------- sync
 function renderSync() {
@@ -272,6 +292,7 @@ document.addEventListener("keydown", e => {
   else if (k === "arrowright") P.seek(P.time() + (e.shiftKey ? 10 : 2));
   else if (k === "h") { $("tag-team").value = "home"; fillTagPlayers(); toast("team: home"); }
   else if (k === "v") { $("tag-team").value = "away"; fillTagPlayers(); toast("team: away"); }
+  else if (k === "m") markSelected();
   else if (KEYS[k]) addTag(KEYS[k]);
 });
 

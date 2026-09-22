@@ -10,6 +10,7 @@ const PORT = 9335;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const getJSON = u => new Promise((res, rej) => http.get(u, r => { let b = ""; r.on("data", d => b += d); r.on("end", () => res(JSON.parse(b))); }).on("error", rej));
 let failures = 0;
+const fmtJs = s => { const m = Math.floor(s/60), r = s - m*60; return `${m}:${r < 10 ? "0" : ""}${r.toFixed(1)}`; };
 const check = (name, cond, detail = "") => { console.log(`${cond ? "PASS" : "FAIL"}  ${name}${cond ? "" : "   -> " + detail}`); if (!cond) failures++; };
 
 (async () => {
@@ -52,6 +53,23 @@ const check = (name, cond, detail = "") => { console.log(`${cond ? "PASS" : "FAI
     await ev("P.seek = t => { window._seek = t }");
     await ev("[...document.querySelectorAll('#ev-body tr')].find(r=>r.cells[0].textContent==='Q1').click()");
     check("event click seeks 5s early", Math.abs(await ev("window._seek") - (372 - 5)) < 0.01, await ev("window._seek"));
+
+    // "here" button: anchor an event at the current video time and re-time neighbours
+    await ev("P.time = () => 500");
+    await ev("[...document.querySelectorAll('#ev-body tr')].find(r=>r.cells[0].textContent==='Q1' && r.cells[1].textContent==='2:01').querySelector('button.mark').click()");
+    check("event anchored via here-button", await waitFor("document.getElementById('sync-list').textContent.includes('2:01 ↔ 8:20.0')"));
+    const t201 = await ev("[...document.querySelectorAll('#ev-body tr')].find(r=>r.cells[0].textContent==='Q1' && r.cells[1].textContent==='2:01')");
+    check("anchored event shows check mark", await ev("[...document.querySelectorAll('#ev-body tr')].find(r=>r.cells[1].textContent==='2:01').querySelector('button.mark').textContent") === "✓");
+    // 0:54 now interpolates between (0:00,300) and (2:01,500): 300 + 54*200/121
+    const v054 = await ev("[...document.querySelectorAll('#ev-body tr')].find(r=>r.cells[0].textContent==='Q1' && r.cells[1].textContent==='0:54').cells[6].textContent");
+    check("neighbour re-timed by new anchor", v054 === fmtJs(300 + 54 * 200 / 121), v054);
+    // key M on a selected event
+    await ev("[...document.querySelectorAll('#ev-body tr')].find(r=>r.cells[0].textContent==='Q1' && r.cells[1].textContent==='3:05').click()");
+    await ev("P.time = () => 900; document.body.dispatchEvent(new KeyboardEvent('keydown', {key:'m', bubbles:true}))");
+    check("key M anchors selected event", await waitFor("document.getElementById('sync-list').textContent.includes('3:05 ↔ 15:00.0')"));
+    await ev("document.querySelectorAll('#sync-list button').forEach(b => { if (b.dataset.c === '121' || b.dataset.c === '185') b.click() })"); await sleep(800);
+    check("extra anchors removed", await waitFor("!document.getElementById('sync-list').textContent.includes('2:01') && !document.getElementById('sync-list').textContent.includes('3:05')"));
+    await ev("P.time = () => 700"); await sleep(1200);
 
     // game clock display
     await ev("P.time = () => 700");
