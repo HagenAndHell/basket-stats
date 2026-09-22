@@ -44,3 +44,43 @@ def test_landmarks_sane():
     assert court.LANDMARKS["R_basket"] == (28 - 1.575, 7.5)
     assert court.LANDMARKS["L_3pt_apex"][0] == pytest.approx(1.575 + 6.75)
     assert len(court.LANDMARKS) >= 20
+
+
+def test_distortion_fit_recovers_synthetic_fisheye():
+    import numpy as np
+    Hm = synthetic_H()                        # court -> ideal pixel
+    W, Hh = 1920, 1080
+    true = {"cx": 980.0, "cy": 530.0, "k1": -0.18, "k2": 0.03, "f": 0.5 * (W * W + Hh * Hh) ** 0.5}
+    names = ["corner_L_bottom", "corner_R_bottom", "corner_R_top", "corner_L_top", "centre", "half_bottom", "half_top",
+             "L_ft_bottom", "L_ft_top", "R_ft_bottom", "R_ft_top", "L_3pt_apex", "R_3pt_apex", "L_key_bottom", "R_key_top"]
+    pts = []
+    for n in names:
+        x, y = court.LANDMARKS[n]
+        v = Hm @ [x, y, 1]
+        ux, uy = v[0] / v[2], v[1] / v[2]
+        dx, dy = court._distort_pt(ux, uy, true)          # what the fisheye camera would record
+        pts.append({"name": n, "px": dx, "py": dy})
+    cal = court.calibrate(pts, W, Hh)
+    assert cal["error_plain_m"] > 0.15                      # plain homography is clearly off
+    assert cal["dist"] is not None
+    assert cal["error_m"] < 0.02                            # distortion model fixes it
+    assert abs(cal["dist"]["k1"] - true["k1"]) < 0.03
+    # round trip through the fitted model
+    px, py = court.to_pixel(cal["H"], 10.0, 4.0, cal["dist"])
+    x, y = court.to_court(cal["H"], px, py, cal["dist"])
+    assert (x, y) == (pytest.approx(10.0, abs=1e-3), pytest.approx(4.0, abs=1e-3))
+
+
+def test_distortion_skipped_with_few_points():
+    Hm = synthetic_H()
+    pts = []
+    for n in ["corner_L_bottom", "corner_R_bottom", "corner_R_top", "corner_L_top", "centre"]:
+        x, y = court.LANDMARKS[n]; v = Hm @ [x, y, 1]
+        pts.append({"name": n, "px": v[0] / v[2], "py": v[1] / v[2]})
+    cal = court.calibrate(pts, 1920, 1080)
+    assert cal["dist"] is None and cal["error_m"] < 1e-6
+
+
+def test_court_lines_shape():
+    lines = court.court_lines()
+    assert len(lines) == 7 and all(len(seg) > 10 for seg in lines)

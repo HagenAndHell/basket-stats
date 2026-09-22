@@ -64,8 +64,11 @@ Court tab (Phase 2: tracking)
   1. Calibration: open "Court calibration", press "Grab frame at current time",
      pick a landmark in the dropdown and click it in the frame. Do 4 or more
      spread over the court (the far corners, half-court line ends, free-throw
-     lane corners, 3-pt/baseline intersections...). Save. The mean error in
-     metres is shown; under 0.3 m is good.
+     lane corners, 3-pt/baseline intersections...). With 7+ points the lens
+     (fisheye) distortion is fitted as well - include points near the image
+     edges for that. Save. The error in metres is shown; under 0.3 m is good.
+     The green outline drawn over the frame shows where the model thinks the
+     lines are; mouse wheel zooms, drag pans.
   2. Tracking: "Run 60 s from here" for a quick test, "Run on whole video" for
      the full game (background job; progress shown). Data lands in data/tracks/.
   3. The 2D court follows the video: one dot per tracked player, ID label, ball

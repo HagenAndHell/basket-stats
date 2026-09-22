@@ -39,6 +39,98 @@ LANDMARKS: dict[str, tuple[float, float]] = {
 }
 
 
+# ---------- lens distortion (Brown radial model, k1, k2, centre) ----------
+# Pixel -> undistorted normalised pixel: r = |p - c| / f ; p_u = c + (p - c) * (1 + k1 r^2 + k2 r^4)
+# f = image half-diagonal so k's are dimensionless and well-conditioned.
+
+def _undistort_pts(pts, dist):
+    pts = np.asarray(pts, dtype=np.float64)
+    if not dist:
+        return pts
+    cx, cy, k1, k2, f = dist["cx"], dist["cy"], dist["k1"], dist["k2"], dist["f"]
+    d = pts - [cx, cy]
+    r2 = (d ** 2).sum(axis=1) / (f * f)
+    fac = 1 + k1 * r2 + k2 * r2 * r2
+    return [cx, cy] + d * fac[:, None]
+
+
+def _distort_pt(x, y, dist, iters=8):
+    """Inverse of _undistort_pts for one point (fixed-point iteration)."""
+    if not dist:
+        return x, y
+    cx, cy, k1, k2, f = dist["cx"], dist["cy"], dist["k1"], dist["k2"], dist["f"]
+    ux, uy = x - cx, y - cy
+    dx, dy = ux, uy
+    for _ in range(iters):
+        r2 = (dx * dx + dy * dy) / (f * f)
+        fac = 1 + k1 * r2 + k2 * r2 * r2
+        dx, dy = ux / fac, uy / fac
+    return cx + dx, cy + dy
+
+
+def _fit(src, dst, w, h, fit_distortion: bool):
+    """Return (H as 3x3 list, dist dict|None, rms error m)."""
+    import cv2
+    src_a, dst_a = np.asarray(src, dtype=np.float64), np.asarray(dst, dtype=np.float64)
+    f = 0.5 * (w * w + h * h) ** 0.5
+
+    def solve_H(pts):
+        H, _ = cv2.findHomography(pts, dst_a, 0)
+        return H
+
+    def err(H, pts):
+        if H is None:
+            return 1e9
+        v = (H @ np.c_[pts, np.ones(len(pts))].T).T
+        proj = v[:, :2] / v[:, 2:3]
+        return float(np.sqrt(((proj - dst_a) ** 2).sum(axis=1).mean()))
+
+    H0 = solve_H(src_a)
+    e0 = err(H0, src_a)
+    if not fit_distortion or len(src) < 7 or H0 is None:
+        return H0, None, e0
+
+    from scipy.optimize import least_squares
+
+    def residuals(x):
+        dist = {"cx": x[0], "cy": x[1], "k1": x[2], "k2": x[3], "f": f}
+        u = _undistort_pts(src_a, dist)
+        H = solve_H(u)
+        if H is None:
+            return np.full(len(src) * 2, 1e3)
+        v = (H @ np.c_[u, np.ones(len(u))].T).T
+        proj = v[:, :2] / v[:, 2:3]
+        return (proj - dst_a).ravel()
+
+    x0 = np.array([w / 2, h / 2, 0.0, 0.0])
+    lo = [w * 0.3, h * 0.3, -1.0, -1.0]
+    hi = [w * 0.7, h * 0.7, 1.0, 1.0]
+    res = least_squares(residuals, x0, bounds=(lo, hi), x_scale=[w * 0.1, h * 0.1, 0.1, 0.1])
+    dist = {"cx": float(res.x[0]), "cy": float(res.x[1]), "k1": float(res.x[2]), "k2": float(res.x[3]), "f": f}
+    u = _undistort_pts(src_a, dist)
+    H1 = solve_H(u)
+    e1 = err(H1, u)
+    if H1 is None or e1 >= e0 * 0.98:  # distortion did not help
+        return H0, None, e0
+    return H1, dist, e1
+
+
+def calibrate(points: list[dict], width: int, height: int, fit_distortion: bool = True) -> dict | None:
+    """points: [{"name","px","py"}]. Returns {"H", "dist", "error_m", "error_plain_m"} or None (<4 points)."""
+    src, dst = [], []
+    for p in points:
+        if p.get("name") in LANDMARKS:
+            src.append([p["px"], p["py"]])
+            dst.append(LANDMARKS[p["name"]])
+    if len(src) < 4:
+        return None
+    H0, _, e0 = _fit(src, dst, width, height, False)
+    H, dist, e = _fit(src, dst, width, height, fit_distortion)
+    if H is None:
+        return None
+    return {"H": H.tolist(), "dist": dist, "error_m": e, "error_plain_m": e0, "width": width, "height": height}
+
+
 def homography(points: list[dict]) -> list[list[float]] | None:
     """points: [{"name": landmark, "px": x, "py": y}, ...]  -> 3x3 pixel->court matrix (as lists) or None."""
     import cv2
@@ -57,24 +149,27 @@ def homography(points: list[dict]) -> list[list[float]] | None:
     return H.tolist() if H is not None else None
 
 
-def to_court(H, px: float, py: float) -> tuple[float, float]:
+def to_court(H, px: float, py: float, dist: dict | None = None) -> tuple[float, float]:
+    if dist:
+        px, py = _undistort_pts([[px, py]], dist)[0]
     h = np.asarray(H)
     v = h @ np.array([px, py, 1.0])
     return float(v[0] / v[2]), float(v[1] / v[2])
 
 
-def to_pixel(H, x: float, y: float) -> tuple[float, float]:
+def to_pixel(H, x: float, y: float, dist: dict | None = None) -> tuple[float, float]:
     hinv = np.linalg.inv(np.asarray(H))
     v = hinv @ np.array([x, y, 1.0])
-    return float(v[0] / v[2]), float(v[1] / v[2])
+    ux, uy = float(v[0] / v[2]), float(v[1] / v[2])
+    return _distort_pt(ux, uy, dist) if dist else (ux, uy)
 
 
-def reprojection_error(H, points: list[dict]) -> float:
+def reprojection_error(H, points: list[dict], dist: dict | None = None) -> float:
     """Mean error in metres over the given landmarks."""
     errs = []
     for p in points:
         if p.get("name") in LANDMARKS:
-            cx, cy = to_court(H, p["px"], p["py"])
+            cx, cy = to_court(H, p["px"], p["py"], dist)
             tx, ty = LANDMARKS[p["name"]]
             errs.append(((cx - tx) ** 2 + (cy - ty) ** 2) ** 0.5)
     return float(np.mean(errs)) if errs else 0.0
@@ -87,3 +182,39 @@ def foot_point(box) -> tuple[float, float]:
 
 def on_court(x: float, y: float, margin: float = 1.0) -> bool:
     return -margin <= x <= LENGTH + margin and -margin <= y <= WIDTH + margin
+
+
+def _densify(pts, step=0.5):
+    out = []
+    for (x1, y1), (x2, y2) in zip(pts, pts[1:]):
+        n = max(1, int(((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5 / step))
+        for i in range(n):
+            out.append((x1 + (x2 - x1) * i / n, y1 + (y2 - y1) * i / n))
+    out.append(pts[-1])
+    return out
+
+
+def court_lines() -> list[list[tuple[float, float]]]:
+    """Court markings as polylines in metres (densified so lens distortion shows as curves)."""
+    import math
+    L, W, ft, lw, r, bx, c3 = LENGTH, WIDTH, FT_LINE, LANE_W, ARC_R, BASKET_X, CORNER3_Y
+    segs = [
+        [(0, 0), (L, 0), (L, W), (0, W), (0, 0)],
+        [(L / 2, 0), (L / 2, W)],
+        [(0, W / 2 - lw / 2), (ft, W / 2 - lw / 2), (ft, W / 2 + lw / 2), (0, W / 2 + lw / 2)],
+        [(L, W / 2 - lw / 2), (L - ft, W / 2 - lw / 2), (L - ft, W / 2 + lw / 2), (L, W / 2 + lw / 2)],
+    ]
+    def arc(cx, d):
+        pts = []
+        a = -math.pi / 2
+        while a <= math.pi / 2 + 1e-9:
+            x, y = cx + d * r * math.cos(a), W / 2 + r * math.sin(a)
+            if c3 <= y <= W - c3:
+                pts.append((x, y))
+            a += math.pi / 60
+        return pts
+    a1, a2 = arc(bx, 1), arc(L - bx, -1)
+    segs.append([(0, c3), a1[0], *a1, (0, W - c3)])
+    segs.append([(L, c3), a2[0], *a2, (L, W - c3)])
+    segs.append([(L / 2 + 1.8 * math.cos(t * math.pi / 30), W / 2 + 1.8 * math.sin(t * math.pi / 30)) for t in range(61)])
+    return [_densify(s) for s in segs]

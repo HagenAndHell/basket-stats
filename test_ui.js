@@ -131,6 +131,7 @@ const check = (name, cond, detail = "") => { console.log(`${cond ? "PASS" : "FAI
     check("points listed in fullscreen bar too", await ev("document.getElementById('cf-pts').textContent.includes('corner_R_bottom')"));
     await ev("document.getElementById('cf-save').click()");
     check("save from fullscreen works", await waitFor("S.data.calibration && S.data.calibration.H"));
+    await waitFor("CF.outline && CF.outline.length === 7", 5000);
     check("court outline drawn after calibration (green pixels on canvas)", await ev("(()=>{drawCalib(); const c=document.getElementById('cf-canvas'); const d=c.getContext('2d').getImageData(0,0,c.width,c.height).data; let n=0; for(let i=0;i<d.length;i+=4) if(d[i+1]>150 && d[i]<100 && d[i+2]<150) n++; return n;})()") > 100);
     await ev("document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape', bubbles:true}))");
     check("Esc closes calibrator", await ev("document.getElementById('calib-full').classList.contains('hidden')"));

@@ -211,6 +211,7 @@ def make_clip(match_id: int, c: ClipIn):
 # ---------- court calibration
 class CalibIn(BaseModel):
     points: list[dict]   # [{"name": landmark, "px": .., "py": ..}]
+    fit_distortion: bool = True
 
 
 @app.get("/api/court/landmarks")
@@ -222,11 +223,23 @@ def landmarks():
 @app.post("/api/match/{match_id}/calibration")
 def set_calibration(match_id: int, c: CalibIn):
     pr = project(match_id)
-    H = court.homography(c.points)
-    pr.data["calibration"] = {"points": c.points, "H": H,
-                              "error_m": court.reprojection_error(H, c.points) if H else None}
+    v = pr.data.get("video") or {}
+    w, h = int(v.get("width") or 1920), int(v.get("height") or 1080)
+    cal = court.calibrate(c.points, w, h, c.fit_distortion)
+    pr.data["calibration"] = {"points": c.points, "H": None, "dist": None, "error_m": None, "error_plain_m": None, **(cal or {})}
     pr.save()
     return pr.data["calibration"]
+
+
+@app.get("/api/match/{match_id}/calibration/outline")
+def calibration_outline(match_id: int):
+    """Court lines projected into the (distorted) image, as pixel polylines, for drawing over the frame."""
+    pr = project(match_id)
+    cal = pr.data.get("calibration") or {}
+    if not cal.get("H"):
+        raise HTTPException(404, "not calibrated")
+    H, dist = cal["H"], cal.get("dist")
+    return {"lines": [[list(court.to_pixel(H, x, y, dist)) for x, y in seg] for seg in court.court_lines()]}
 
 
 @app.get("/api/match/{match_id}/frame")
@@ -310,7 +323,8 @@ def positions(match_id: int, t0: float = Query(...), t1: float = Query(...)):
     import bisect
     pr = project(match_id)
     meta, frames = _tracks(match_id)
-    H = (pr.data.get("calibration") or {}).get("H")
+    cal = pr.data.get("calibration") or {}
+    H, dist = cal.get("H"), cal.get("dist")
     ts = [f["t"] for f in frames]
     i0, i1 = bisect.bisect_left(ts, t0), bisect.bisect_right(ts, t1)
     out = []
@@ -320,7 +334,7 @@ def positions(match_id: int, t0: float = Query(...), t1: float = Query(...)):
             fx, fy = court.foot_point(p[1:5])
             item = {"id": p[0], "box": p[1:5], "foot": [round(fx, 1), round(fy, 1)]}
             if H:
-                cx, cy = court.to_court(H, fx, fy)
+                cx, cy = court.to_court(H, fx, fy, dist)
                 item["court"] = [round(cx, 2), round(cy, 2)]
                 item["on"] = court.on_court(cx, cy)
             ps.append(item)

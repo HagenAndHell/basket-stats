@@ -121,7 +121,7 @@
         <div class="row" style="margin:6px 0"><label><input type="checkbox" id="court-trails"> trails (2 s)</label> <span class="muted" id="court-info"></span></div>
         <details id="calib" style="margin-top:6px">
           <summary><b>Court calibration</b> <span class="muted" id="calib-status">not calibrated</span></summary>
-          <p class="muted" style="font-size:12px;margin:6px 0">Pick a landmark, click it in the frame. 4+ points needed; more (spread across the court) = better. The frame is taken at the current video time (needs the local/downloaded video).</p>
+          <p class="muted" style="font-size:12px;margin:6px 0">Pick a landmark, click it in the frame. 4 points minimum; with 7 or more (spread over the whole court, including near the image edges) the lens (fisheye) distortion is fitted too. The frame is taken at the current video time (needs the local/downloaded video).</p>
           <div class="row"><button class="small primary" id="btn-frame">Open calibrator (frame at current time)</button> <button class="small" id="btn-calib-save">Save calibration</button> <button class="small" id="btn-calib-clear">Clear</button></div>
           <div id="calib-pts" style="font-size:12px; margin-top:4px"></div>
         </details>
@@ -310,14 +310,15 @@ let COURT = null, LM = null, calibPts = [], calibSrc = null;
 async function loadCourtMeta() { COURT = await api("court/landmarks"); LM = COURT.landmarks;
   $("lm-select").innerHTML = Object.keys(LM).map(k => `<option value="${k}">${k.replace(/_/g, " ")}</option>`).join(""); }
 // fullscreen calibrator: full-res frame on a canvas with zoom/pan
-const CF = { img: null, scale: 1, ox: 0, oy: 0, drag: null, mouse: null, fit: 1 };
+const CF = { img: null, scale: 1, ox: 0, oy: 0, drag: null, mouse: null, fit: 1, outline: null };
+async function loadOutline() { try { CF.outline = S.data?.calibration?.H ? (await api(`match/${S.matchId}/calibration/outline`)).lines : null; } catch { CF.outline = null; } drawCalib(); }
 $("btn-frame").onclick = async () => {
   const t = P.time();
   const r = await fetch(`/api/match/${S.matchId}/frame?t=${t}&width=0`); if (!r.ok) return toast(await r.text());
   calibSrc = { w: +r.headers.get("X-Source-Width"), h: +r.headers.get("X-Source-Height") };
   const img = new Image(); img.src = URL.createObjectURL(await r.blob());
   await img.decode(); CF.img = img;
-  $("calib-full").classList.remove("hidden"); cfFit(); drawCalib();
+  $("calib-full").classList.remove("hidden"); cfFit(); drawCalib(); loadOutline();
 };
 function cfFit() { const cv = $("cf-canvas"); cv.width = cv.clientWidth; cv.height = cv.clientHeight; if (!CF.img) return;
   CF.fit = Math.min(cv.width / CF.img.width, cv.height / CF.img.height); CF.scale = CF.fit; CF.ox = (cv.width - CF.img.width * CF.scale) / 2; CF.oy = (cv.height - CF.img.height * CF.scale) / 2; }
@@ -347,8 +348,7 @@ function drawCalib() {
   if ($("calib-full").classList.contains("hidden") || !CF.img) return;
   const cv = $("cf-canvas"), g = cv.getContext("2d"); g.setTransform(1, 0, 0, 1, 0, 0); g.clearRect(0, 0, cv.width, cv.height);
   g.imageSmoothingEnabled = CF.scale < 2; g.drawImage(CF.img, CF.ox, CF.oy, CF.img.width * CF.scale, CF.img.height * CF.scale);
-  const H = S.data?.calibration?.H;
-  if (H) { g.strokeStyle = "rgba(34,197,94,.7)"; g.lineWidth = 1.5; courtLines().forEach(seg => { g.beginPath(); seg.forEach(([x, y], i) => { const [px, py] = toPixelH(H, x, y); const X = CF.ox + px * CF.scale, Y = CF.oy + py * CF.scale; i ? g.lineTo(X, Y) : g.moveTo(X, Y); }); g.stroke(); }); }
+  if (CF.outline) { g.strokeStyle = "rgba(34,197,94,.75)"; g.lineWidth = 1.5; CF.outline.forEach(seg => { g.beginPath(); seg.forEach(([px, py], i) => { const X = CF.ox + px * CF.scale, Y = CF.oy + py * CF.scale; i ? g.lineTo(X, Y) : g.moveTo(X, Y); }); g.stroke(); }); }
   for (const p of calibPts) { const X = CF.ox + p.px * CF.scale, Y = CF.oy + p.py * CF.scale; g.strokeStyle = "#22c55e"; g.lineWidth = 1.5; g.beginPath(); g.moveTo(X - 10, Y); g.lineTo(X + 10, Y); g.moveTo(X, Y - 10); g.lineTo(X, Y + 10); g.stroke(); g.beginPath(); g.arc(X, Y, 6, 0, 7); g.stroke();
     g.font = "12px sans-serif"; g.fillStyle = "#000"; g.fillText(p.name, X + 10, Y - 5); g.fillStyle = "#fff"; g.fillText(p.name, X + 9, Y - 6); }
   if (CF.mouse) { const [mx, my] = CF.mouse; g.strokeStyle = "rgba(255,255,255,.5)"; g.lineWidth = 1; g.beginPath(); g.moveTo(mx, 0); g.lineTo(mx, cv.height); g.moveTo(0, my); g.lineTo(cv.width, my); g.stroke();
@@ -356,9 +356,10 @@ function drawCalib() {
 }
 $("btn-calib-clear").onclick = () => { calibPts = []; drawCalib(); };
 $("btn-calib-save").onclick = async () => {
-  try { S.data.calibration = await post(`match/${S.matchId}/calibration`, { points: calibPts }); renderCalibStatus(); drawCalib(); toast(S.data.calibration.H ? `calibrated, mean error ${S.data.calibration.error_m.toFixed(2)} m` : "need 4+ points"); } catch (e) { toast(e.message); }
+  try { S.data.calibration = await post(`match/${S.matchId}/calibration`, { points: calibPts }); renderCalibStatus(); loadOutline();
+    const c = S.data.calibration; toast(c.H ? (c.dist ? `calibrated with lens correction: error ${c.error_m.toFixed(2)} m (was ${c.error_plain_m.toFixed(2)} m without)` : `calibrated, error ${c.error_m.toFixed(2)} m${calibPts.length < 7 ? " — add 7+ points to fit lens distortion" : ""}`) : "need 4+ points"); } catch (e) { toast(e.message); }
 };
-function renderCalibStatus() { const c = S.data.calibration; $("calib-status").textContent = c?.H ? `calibrated (${c.points.length} pts, err ${c.error_m.toFixed(2)} m)` : "not calibrated"; if (c?.points) calibPts = c.points.slice(); }
+function renderCalibStatus() { const c = S.data.calibration; $("calib-status").textContent = c?.H ? `calibrated (${c.points.length} pts, err ${c.error_m.toFixed(2)} m${c.dist ? `, lens k1=${c.dist.k1.toFixed(3)}` : ", no lens correction"})` : "not calibrated"; if (c?.points) calibPts = c.points.slice(); }
 function homographyFromPts() { return S.data?.calibration?.H || null; }   // server computes; we only draw using the saved one
 function toPixelH(H, x, y) { const inv = inv3(H); const v = mul3(inv, [x, y, 1]); return [v[0] / v[2], v[1] / v[2]]; }
 function mul3(m, v) { return [0, 1, 2].map(i => m[i][0] * v[0] + m[i][1] * v[1] + m[i][2] * v[2]); }
