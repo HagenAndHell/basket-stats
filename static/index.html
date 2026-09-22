@@ -357,10 +357,10 @@ function drawCalib() {
 }
 $("btn-calib-clear").onclick = () => { calibPts = []; drawCalib(); };
 $("btn-calib-save").onclick = async () => {
-  try { S.data.calibration = await post(`match/${S.matchId}/calibration`, { points: calibPts }); renderCalibStatus(); loadOutline();
+  try { S.data.calibration = await post(`match/${S.matchId}/calibration`, { points: calibPts, width: calibSrc?.w || S.data.calibration?.width, height: calibSrc?.h || S.data.calibration?.height }); renderCalibStatus(); loadOutline();
     const c = S.data.calibration; toast(c.H ? (c.dist ? `calibrated with lens correction: error ${c.error_m.toFixed(2)} m (was ${c.error_plain_m.toFixed(2)} m without)` : `calibrated, error ${c.error_m.toFixed(2)} m${calibPts.length < 6 ? " — add 6+ points to fit lens distortion" : ""}`) : "need 4+ points"); } catch (e) { toast(e.message); }
 };
-function renderCalibStatus() { const c = S.data.calibration; $("calib-status").textContent = c?.H ? `calibrated (${c.points.length} pts, err ${c.error_m.toFixed(2)} m${c.dist ? `, lens k1=${c.dist.k1.toFixed(3)}` : ", no lens correction"})` : "not calibrated"; if (c?.points) calibPts = c.points.slice(); }
+function renderCalibStatus() { const c = S.data.calibration; $("calib-status").textContent = c?.H ? `calibrated (${c.points.length} pts, err ${c.error_m.toFixed(2)} m${c.dist ? `, lens k1=${c.dist.k1.toFixed(3)}` : ", no lens correction"}, frame ${c.width}×${c.height})` : "not calibrated"; if (c?.points) calibPts = c.points.slice(); }
 function homographyFromPts() { return S.data?.calibration?.H || null; }   // server computes; we only draw using the saved one
 function toPixelH(H, x, y) { const inv = inv3(H); const v = mul3(inv, [x, y, 1]); return [v[0] / v[2], v[1] / v[2]]; }
 function mul3(m, v) { return [0, 1, 2].map(i => m[i][0] * v[0] + m[i][1] * v[1] + m[i][2] * v[2]); }

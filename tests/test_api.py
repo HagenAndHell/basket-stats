@@ -100,3 +100,13 @@ def test_calibration_and_positions(client, tmp_path, monkeypatch):
     s = client.get("/api/match/8439241/track/summary").json()
     assert s["frames"] == 2 and s["tracks"][0]["id"] == 7 and s["tracks"][0]["n"] == 2
     assert client.get("/api/match/8439241/track").json()["available"] is True
+
+
+def test_calibration_uses_given_frame_size(client):
+    from tests.test_court import USER_POINTS_4K
+    client.get("/api/match/8439241")
+    pts = [{"name": a, "px": float(b), "py": float(c)} for a, b, c in (l.split() for l in USER_POINTS_4K.splitlines())]
+    r = client.post("/api/match/8439241/calibration", json={"points": pts, "width": 3840, "height": 2160}).json()
+    assert r["width"] == 3840 and r["error_m"] < 0.15 and r["dist"]["k1"] < -0.3
+    r2 = client.post("/api/match/8439241/calibration", json={"points": pts, "width": 1920, "height": 1080}).json()
+    assert r2["error_m"] > r["error_m"]  # wrong frame size gives a worse fit (this was the bug)

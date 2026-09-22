@@ -212,6 +212,8 @@ def make_clip(match_id: int, c: ClipIn):
 class CalibIn(BaseModel):
     points: list[dict]   # [{"name": landmark, "px": .., "py": ..}]
     fit_distortion: bool = True
+    width: int | None = None    # size of the frame the points were clicked on
+    height: int | None = None
 
 
 @app.get("/api/court/landmarks")
@@ -224,8 +226,16 @@ def landmarks():
 def set_calibration(match_id: int, c: CalibIn):
     pr = project(match_id)
     v = pr.data.get("video") or {}
-    w, h = int(v.get("width") or 1920), int(v.get("height") or 1080)
-    cal = court.calibrate(c.points, w, h, c.fit_distortion)
+    w, h = c.width, c.height
+    if not w or not h:
+        # fall back to the actual local file, never to a stale record
+        local = v.get("local")
+        if local and Path(local).is_file():
+            pv = video.probe(local)
+            w, h = pv["width"], pv["height"]
+        else:
+            w, h = int(v.get("width") or 1920), int(v.get("height") or 1080)
+    cal = court.calibrate(c.points, int(w), int(h), c.fit_distortion)
     pr.data["calibration"] = {"points": c.points, "H": None, "dist": None, "error_m": None, "error_plain_m": None, **(cal or {})}
     pr.save()
     return pr.data["calibration"]
