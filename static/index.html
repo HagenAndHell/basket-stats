@@ -136,7 +136,7 @@
   <div class="cf-bar">
     <b>Court calibration</b>
     <label>Landmark <select id="lm-select"></select></label>
-    <span class="muted">Click to place · wheel = zoom · drag = pan · <span class="kbd">R</span> reset view · <span class="kbd">Esc</span> close</span>
+    <span class="muted">Click to place · wheel = zoom · drag = pan · <span class="kbd">R</span> reset view · <span class="kbd">Esc</span> close · after Save, ±px shows how far each point is from the fitted model — red ones are probably mis-clicked or mislabelled</span>
     <span id="cf-info" class="muted"></span>
     <span style="flex:1"></span>
     <button class="small" id="cf-reset">Reset view</button>
@@ -343,7 +343,8 @@ window.addEventListener("resize", () => { if (!$("calib-full").classList.contain
 }
 document.addEventListener("keydown", e => { if ($("calib-full").classList.contains("hidden")) return; if (e.key === "Escape") cfClose(); if (e.key.toLowerCase() === "r" && !e.target.matches("input,select")) { cfFit(); drawCalib(); } }, true);
 function drawCalib() {
-  const list = calibPts.map(p => `<span class="a">${p.name} (${p.px},${p.py}) <button class="small" data-rm="${p.name}">×</button></span>`).join("") || '<span class="muted">no points yet</span>';
+  const res = Object.fromEntries((S.data?.calibration?.residuals || []).map(r => [r.name, r]));
+  const list = calibPts.map(p => { const r = res[p.name]; const bad = r && r.px_err > 25; return `<span class="a" style="${bad ? "border-color:var(--warn)" : ""}">${p.name} (${p.px},${p.py})${r ? ` <span class="${bad ? "" : "muted"}" style="${bad ? "color:var(--warn)" : ""}">±${r.px_err}px</span>` : ""} <button class="small" data-rm="${p.name}">×</button></span>`; }).join("") || '<span class="muted">no points yet</span>';
   for (const id of ["calib-pts", "cf-pts"]) { $(id).innerHTML = list; $(id).querySelectorAll("button").forEach(b => b.onclick = () => { calibPts = calibPts.filter(p => p.name !== b.dataset.rm); drawCalib(); }); }
   if ($("calib-full").classList.contains("hidden") || !CF.img) return;
   const cv = $("cf-canvas"), g = cv.getContext("2d"); g.setTransform(1, 0, 0, 1, 0, 0); g.clearRect(0, 0, cv.width, cv.height);
@@ -357,7 +358,7 @@ function drawCalib() {
 $("btn-calib-clear").onclick = () => { calibPts = []; drawCalib(); };
 $("btn-calib-save").onclick = async () => {
   try { S.data.calibration = await post(`match/${S.matchId}/calibration`, { points: calibPts }); renderCalibStatus(); loadOutline();
-    const c = S.data.calibration; toast(c.H ? (c.dist ? `calibrated with lens correction: error ${c.error_m.toFixed(2)} m (was ${c.error_plain_m.toFixed(2)} m without)` : `calibrated, error ${c.error_m.toFixed(2)} m${calibPts.length < 7 ? " — add 7+ points to fit lens distortion" : ""}`) : "need 4+ points"); } catch (e) { toast(e.message); }
+    const c = S.data.calibration; toast(c.H ? (c.dist ? `calibrated with lens correction: error ${c.error_m.toFixed(2)} m (was ${c.error_plain_m.toFixed(2)} m without)` : `calibrated, error ${c.error_m.toFixed(2)} m${calibPts.length < 6 ? " — add 6+ points to fit lens distortion" : ""}`) : "need 4+ points"); } catch (e) { toast(e.message); }
 };
 function renderCalibStatus() { const c = S.data.calibration; $("calib-status").textContent = c?.H ? `calibrated (${c.points.length} pts, err ${c.error_m.toFixed(2)} m${c.dist ? `, lens k1=${c.dist.k1.toFixed(3)}` : ", no lens correction"})` : "not calibrated"; if (c?.points) calibPts = c.points.slice(); }
 function homographyFromPts() { return S.data?.calibration?.H || null; }   // server computes; we only draw using the saved one

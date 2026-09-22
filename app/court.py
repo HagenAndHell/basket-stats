@@ -87,13 +87,14 @@ def _fit(src, dst, w, h, fit_distortion: bool):
 
     H0 = solve_H(src_a)
     e0 = err(H0, src_a)
-    if not fit_distortion or len(src) < 7 or H0 is None:
+    if not fit_distortion or len(src) < 6 or H0 is None:
         return H0, None, e0
+    fit_k2 = len(src) >= 9
 
     from scipy.optimize import least_squares
 
     def residuals(x):
-        dist = {"cx": x[0], "cy": x[1], "k1": x[2], "k2": x[3], "f": f}
+        dist = {"cx": x[0], "cy": x[1], "k1": x[2], "k2": x[3] if fit_k2 else 0.0, "f": f}
         u = _undistort_pts(src_a, dist)
         H = solve_H(u)
         if H is None:
@@ -103,16 +104,27 @@ def _fit(src, dst, w, h, fit_distortion: bool):
         return (proj - dst_a).ravel()
 
     x0 = np.array([w / 2, h / 2, 0.0, 0.0])
-    lo = [w * 0.3, h * 0.3, -1.0, -1.0]
-    hi = [w * 0.7, h * 0.7, 1.0, 1.0]
+    lo = [w * 0.3, h * 0.3, -1.0, -1.0 if fit_k2 else -1e-9]
+    hi = [w * 0.7, h * 0.7, 1.0, 1.0 if fit_k2 else 1e-9]
     res = least_squares(residuals, x0, bounds=(lo, hi), x_scale=[w * 0.1, h * 0.1, 0.1, 0.1])
-    dist = {"cx": float(res.x[0]), "cy": float(res.x[1]), "k1": float(res.x[2]), "k2": float(res.x[3]), "f": f}
+    dist = {"cx": float(res.x[0]), "cy": float(res.x[1]), "k1": float(res.x[2]), "k2": float(res.x[3]) if fit_k2 else 0.0, "f": f}
     u = _undistort_pts(src_a, dist)
     H1 = solve_H(u)
     e1 = err(H1, u)
     if H1 is None or e1 >= e0 * 0.98:  # distortion did not help
         return H0, None, e0
     return H1, dist, e1
+
+
+def residuals_px(H, dist, points: list[dict]) -> list[dict]:
+    """Per landmark: where the model puts it vs where it was clicked (pixels)."""
+    out = []
+    for p in points:
+        if p.get("name") in LANDMARKS:
+            rx, ry = to_pixel(H, *LANDMARKS[p["name"]], dist)
+            out.append({"name": p["name"], "dx": round(rx - p["px"], 1), "dy": round(ry - p["py"], 1),
+                        "px_err": round(float(np.hypot(rx - p["px"], ry - p["py"])), 1)})
+    return out
 
 
 def calibrate(points: list[dict], width: int, height: int, fit_distortion: bool = True) -> dict | None:
@@ -128,7 +140,8 @@ def calibrate(points: list[dict], width: int, height: int, fit_distortion: bool 
     H, dist, e = _fit(src, dst, width, height, fit_distortion)
     if H is None:
         return None
-    return {"H": H.tolist(), "dist": dist, "error_m": e, "error_plain_m": e0, "width": width, "height": height}
+    return {"H": H.tolist(), "dist": dist, "error_m": e, "error_plain_m": e0, "width": width, "height": height,
+            "residuals": residuals_px(H.tolist(), dist, points)}
 
 
 def homography(points: list[dict]) -> list[list[float]] | None:

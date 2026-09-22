@@ -84,3 +84,15 @@ def test_distortion_skipped_with_few_points():
 def test_court_lines_shape():
     lines = court.court_lines()
     assert len(lines) == 7 and all(len(seg) > 10 for seg in lines)
+
+
+def test_residuals_reported():
+    Hm = synthetic_H()
+    pts = []
+    for n in ["corner_L_bottom", "corner_R_bottom", "corner_R_top", "corner_L_top", "centre"]:
+        x, y = court.LANDMARKS[n]; v = Hm @ [x, y, 1]
+        pts.append({"name": n, "px": v[0] / v[2], "py": v[1] / v[2]})
+    pts[-1]["px"] += 80  # mis-click the centre
+    cal = court.calibrate(pts, 1920, 1080)
+    r = {x["name"]: x for x in cal["residuals"]}
+    assert len(r) == 5 and r["centre"]["px_err"] == max(x["px_err"] for x in r.values()) and r["centre"]["px_err"] > 20
