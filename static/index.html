@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>basket-stats</title>
+<style>
+  :root { --bg:#0f1115; --panel:#171a21; --line:#2a2f3a; --fg:#e6e8ee; --muted:#8b93a7; --accent:#22c55e; --home:#3b82f6; --away:#f97316; --warn:#ef4444; --input:#0b0d12; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px system-ui, sans-serif; }
+  header { display:flex; gap:10px; align-items:center; padding:8px 12px; border-bottom:1px solid var(--line); background:var(--panel); flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0 12px 0 0; }
+  input, button, select { background:var(--input); color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:6px 9px; font:inherit; }
+  button { cursor:pointer; } button:hover { border-color:var(--accent); } button.primary { background:var(--accent); color:#000; border-color:var(--accent); font-weight:600; }
+  button.small { padding:2px 7px; font-size:12px; }
+  .muted { color:var(--muted); } .home { color:var(--home); } .away { color:var(--away); }
+  main { display:grid; grid-template-columns: minmax(0,1fr) 420px; gap:10px; padding:10px; height:calc(100vh - 50px); }
+  .left { display:flex; flex-direction:column; gap:10px; min-width:0; overflow:hidden; }
+  .right { display:flex; flex-direction:column; gap:10px; overflow:hidden; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:8px 10px; }
+  #player { position:relative; background:#000; border-radius:8px; overflow:hidden; aspect-ratio:16/9; max-height:60vh; }
+  #player iframe, #player video { position:absolute; inset:0; width:100%; height:100%; border:0; }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  .tabs { display:flex; gap:4px; } .tabs button.active { border-color:var(--accent); color:var(--accent); }
+  .scroll { overflow:auto; flex:1; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { padding:3px 6px; border-bottom:1px solid var(--line); text-align:left; white-space:nowrap; }
+  th { color:var(--muted); font-weight:600; font-size:11px; text-transform:uppercase; position:sticky; top:0; background:var(--panel); }
+  td.n, th.n { text-align:right; font-variant-numeric:tabular-nums; }
+  tr.ev { cursor:pointer; } tr.ev:hover { background:#1f2430; } tr.ev.cur { background:#233524; }
+  tr.ev.nosync { opacity:.55; }
+  .pill { display:inline-block; padding:1px 6px; border-radius:10px; font-size:11px; border:1px solid var(--line); }
+  .kbd { font:12px ui-monospace, monospace; background:#0b0d12; border:1px solid var(--line); border-radius:4px; padding:0 5px; }
+  #sync-list .a { display:inline-block; margin:2px 6px 2px 0; padding:2px 6px; border:1px solid var(--line); border-radius:6px; font-size:12px; }
+  #sync-list .a button { margin-left:4px; }
+  .hidden { display:none !important; }
+  .stat-btns button { min-width:52px; }
+  .stat-btns button.sel { border-color:var(--accent); color:var(--accent); }
+  #toast { position:fixed; bottom:14px; left:50%; transform:translateX(-50%); background:#233524; border:1px solid var(--accent); padding:8px 14px; border-radius:8px; opacity:0; transition:opacity .2s; pointer-events:none; }
+  #toast.show { opacity:1; }
+</style>
+</head>
+<body>
+<header>
+  <h1>basket-stats</h1>
+  <label>Match ID <input id="match-id" size="9" placeholder="8439241"></label>
+  <button id="btn-load" class="primary">Load</button>
+  <span id="match-title" class="muted"></span>
+  <span style="flex:1"></span>
+  <label>Video <input id="video-src" size="40" placeholder="YouTube URL or local file path"></label>
+  <button id="btn-video">Set</button>
+  <button id="btn-download" title="Download the YouTube video for offline playback and clip export">Download</button>
+  <span id="dl-status" class="muted"></span>
+</header>
+
+<main>
+  <div class="left">
+    <div id="player"><div class="muted" style="padding:20px">Load a match and set a video.</div></div>
+    <div class="card row">
+      <span class="muted">Video</span> <b id="vtime" style="font-variant-numeric:tabular-nums">0:00.0</b>
+      <span class="muted">| Game</span> <b id="gtime">—</b>
+      <span style="flex:1"></span>
+      <button class="small" data-seek="-10">−10s</button><button class="small" data-seek="-2">−2s</button>
+      <button class="small" id="btn-play">Play/Pause</button>
+      <button class="small" data-seek="2">+2s</button><button class="small" data-seek="10">+10s</button>
+      <select id="rate"><option>0.25</option><option>0.5</option><option selected>1</option><option>1.5</option><option>2</option></select>
+      <button class="small" id="btn-clip" title="Export a clip around the current time (needs downloaded/local video)">Clip ±6s</button>
+    </div>
+
+    <div class="card">
+      <div class="row">
+        <b>Sync</b>
+        <span class="muted">Pause the video at a known game-clock moment, then:</span>
+        <select id="sync-period"></select>
+        <label>clock <input id="sync-clock" size="6" placeholder="0:00" value="0:00"></label>
+        <button id="btn-anchor" class="primary">Set anchor at current video time</button>
+        <span class="muted">Tip: anchor the period start (0:00) and end (10:00); add more where the clock stopped for long.</span>
+      </div>
+      <div id="sync-list" style="margin-top:6px"></div>
+    </div>
+
+    <div class="card">
+      <div class="row">
+        <b>Tag</b> <span class="muted">at current time:</span>
+        <select id="tag-team"></select>
+        <select id="tag-player"></select>
+        <span class="stat-btns row" id="stat-btns"></span>
+        <span class="muted">Keys: <span class="kbd">O</span>OR <span class="kbd">D</span>DR <span class="kbd">A</span>Ast <span class="kbd">S</span>Stl <span class="kbd">T</span>TO <span class="kbd">B</span>Blk <span class="kbd">2</span>/<span class="kbd">3</span> miss <span class="kbd">I</span>in <span class="kbd">U</span>out <span class="kbd">Space</span> play <span class="kbd">←/→</span> ±2s</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="right">
+    <div class="card" style="display:flex; flex-direction:column; min-height:0; flex:1">
+      <div class="tabs" style="margin-bottom:6px">
+        <button data-tab="events" class="active">Events</button>
+        <button data-tab="box">Box score</button>
+        <button data-tab="tags">Tags</button>
+      </div>
+      <div class="row" id="ev-filter" style="margin-bottom:6px">
+        <select id="f-team"><option value="">Both teams</option><option value="home">Home</option><option value="away">Away</option></select>
+        <select id="f-player"><option value="">All players</option></select>
+        <select id="f-kind"><option value="">All events</option><option value="shot">Shots</option><option value="made">Made shots</option><option value="foul">Fouls</option><option value="tag">Tags</option></select>
+        <label><input type="checkbox" id="f-follow" checked> follow</label>
+      </div>
+      <div class="scroll" id="tab-events"><table><thead><tr><th>Q</th><th>Clock</th><th>Team</th><th>Event</th><th>Player</th><th class="n">Score</th><th>Video</th></tr></thead><tbody id="ev-body"></tbody></table></div>
+      <div class="scroll hidden" id="tab-box"></div>
+      <div class="scroll hidden" id="tab-tags"><table><thead><tr><th>Q</th><th>Clock</th><th>Team</th><th>Stat</th><th>Player</th><th>Video</th><th></th></tr></thead><tbody id="tag-body"></tbody></table></div>
+    </div>
+  </div>
+</main>
+<div id="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmt = s => { if (s == null || isNaN(s)) return "—"; s = Math.max(0, s); const m = Math.floor(s/60), r = s - m*60; return `${m}:${r < 10 ? "0" : ""}${r.toFixed(1)}`; };
+const fmtc = s => { s = Math.max(0, Math.round(s)); return `${Math.floor(s/60)}:${String(s%60).padStart(2,"0")}`; };
+const parseClock = str => { const m = String(str).trim().match(/^(\d+)[:.](\d{1,2})$/); if (m) return +m[1]*60 + +m[2]; const n = Number(str); return isNaN(n) ? null : n; };
+const api = async (path, opts) => { const r = await fetch("/api/" + path, opts); if (!r.ok) throw new Error((await r.text()) || r.status); return r.json(); };
+const post = (path, body) => api(path, { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(body) });
+const toast = msg => { const t = $("toast"); t.textContent = msg; t.classList.add("show"); clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.remove("show"), 1800); };
+
+const STATS = [["oreb","OR"],["dreb","DR"],["ast","Ast"],["stl","Stl"],["to","TO"],["blk","Blk"],["fga2","2p miss"],["fga3","3p miss"],["in","Sub in"],["out","Sub out"]];
+const KEYS = { o:"oreb", d:"dreb", a:"ast", s:"stl", t:"to", b:"blk", "2":"fga2", "3":"fga3", i:"in", u:"out" };
+
+let S = { matchId:null, data:null, events:[], tab:"events", player:null, ytReady:false };
+
+// ---------- video player abstraction (YouTube iframe or <video>)
+const P = {
+  kind:null, yt:null, el:null,
+  time() { if (this.kind === "yt" && this.yt?.getCurrentTime) return this.yt.getCurrentTime(); if (this.kind === "file" && this.el) return this.el.currentTime; return 0; },
+  seek(t) { t = Math.max(0, t); if (this.kind === "yt") this.yt.seekTo(t, true); else if (this.el) this.el.currentTime = t; },
+  toggle() { if (this.kind === "yt") { const st = this.yt.getPlayerState(); st === 1 ? this.yt.pauseVideo() : this.yt.playVideo(); } else if (this.el) { this.el.paused ? this.el.play() : this.el.pause(); } },
+  pause() { if (this.kind === "yt") this.yt.pauseVideo(); else if (this.el) this.el.pause(); },
+  rate(r) { if (this.kind === "yt") this.yt.setPlaybackRate(r); else if (this.el) this.el.playbackRate = r; },
+};
+function mountPlayer(v) {
+  const box = $("player"); box.innerHTML = "";
+  P.kind = null; P.yt = null; P.el = null;
+  if (!v) { box.innerHTML = '<div class="muted" style="padding:20px">No video set.</div>'; return; }
+  if (v.local) {
+    const el = document.createElement("video"); el.controls = true; el.src = `/api/match/${S.matchId}/video/file`; box.appendChild(el); P.kind = "file"; P.el = el;
+  } else if (v.type === "youtube") {
+    const d = document.createElement("div"); d.id = "yt"; box.appendChild(d);
+    const make = () => { P.yt = new YT.Player("yt", { videoId: v.id, playerVars: { rel:0, modestbranding:1 }, events: { onReady: () => { P.kind = "yt"; } } }); };
+    if (window.YT && YT.Player) make(); else { window.onYouTubeIframeAPIReady = make; if (!document.querySelector('script[src*="youtube.com/iframe_api"]')) { const s = document.createElement("script"); s.src = "https://www.youtube.com/iframe_api"; document.head.appendChild(s); } }
+  }
+}
+
+// ---------- loading
+async function loadMatch(id) {
+  S.matchId = id; localStorage.setItem("bs.match", id); location.hash = "match=" + id;
+  S.data = await api(`match/${id}`);
+  const m = S.data.feed.match;
+  $("match-title").innerHTML = `<span class="home">${esc(m.home.name)}</span> ${m.result[0]}–${m.result[1]} <span class="away">${esc(m.away.name)}</span> · ${esc(m.tournament)} · ${esc(m.date)}`;
+  $("video-src").value = S.data.video ? (S.data.video.type === "youtube" ? `https://youtu.be/${S.data.video.id}` : S.data.video.path) : "";
+  $("sync-period").innerHTML = S.data.feed.periods.map(p => `<option value="${p.n}">${p.label}</option>`).join("");
+  $("tag-team").innerHTML = `<option value="home">${esc(m.home.name)}</option><option value="away">${esc(m.away.name)}</option>`;
+  fillTagPlayers(); fillFilterPlayers();
+  mountPlayer(S.data.video);
+  await refreshEvents(); renderSync(); renderBox(); renderTags();
+}
+function players(team) { return S.data.feed.players.filter(p => !team || p.team === team).sort((a,b) => (+a.no||999) - (+b.no||999)); }
+function fillTagPlayers() { $("tag-player").innerHTML = players($("tag-team").value).map(p => `<option value="${p.personId}">#${esc(p.no)} ${esc(p.name)}</option>`).join(""); }
+function fillFilterPlayers() { $("f-player").innerHTML = '<option value="">All players</option>' + ["home","away"].flatMap(t => players(t).map(p => `<option value="${p.personId}">${t === "home" ? "H" : "A"} #${esc(p.no)} ${esc(p.name)}</option>`)).join(""); }
+async function refreshEvents() { S.events = await api(`match/${S.matchId}/events`); renderEvents(); }
+
+// ---------- events table
+function allRows() {
+  const tags = (S.data.tags || []).map(t => ({ id:"t"+t.id, tagId:t.id, period:t.period, clock:t.clock, clockStr: t.clock != null ? fmtc(t.clock) : "—", team:t.team, kind:"tag", label:(STATS.find(s => s[0] === t.stat) || [t.stat, t.stat])[1], personId:t.personId, playerName: playerName(t.personId), playerNo: playerNo(t.personId), video:t.video, score:null }));
+  return [...S.events, ...tags].sort((a,b) => (a.video ?? Infinity) - (b.video ?? Infinity) || (a.period - b.period) || (a.clock - b.clock));
+}
+const playerName = id => S.data.feed.players.find(p => p.personId === id)?.name ?? "";
+const playerNo = id => S.data.feed.players.find(p => p.personId === id)?.no ?? "";
+function renderEvents() {
+  const ft = $("f-team").value, fp = $("f-player").value, fk = $("f-kind").value;
+  const rows = allRows().filter(e => (!ft || e.team === ft) && (!fp || e.personId === fp) && (!fk || (fk === "made" ? e.made === true : e.kind === fk)));
+  $("ev-body").innerHTML = rows.map(e => `<tr class="ev ${e.video == null ? "nosync" : ""}" data-video="${e.video ?? ""}" data-id="${e.id}">
+    <td>${e.period ? "Q" + e.period : ""}</td><td>${esc(e.clockStr)}</td><td class="${e.team}">${e.team === "home" ? "H" : e.team === "away" ? "A" : ""}</td>
+    <td>${esc(e.label)}${e.kind === "tag" ? ' <span class="pill">tag</span>' : ""}</td><td>${e.playerNo !== "" && e.playerNo != null ? "#" + esc(e.playerNo) + " " : ""}${esc(e.playerName || "")}</td>
+    <td class="n">${e.score ? e.score[0] + "–" + e.score[1] : ""}</td><td class="muted">${e.video != null ? fmt(e.video) : "not synced"}</td></tr>`).join("");
+  $("ev-body").querySelectorAll("tr.ev").forEach(tr => tr.onclick = () => { const v = tr.dataset.video; if (v !== "") P.seek(+v - 5); });
+}
+["f-team","f-player","f-kind"].forEach(id => $(id).onchange = renderEvents);
+
+// ---------- sync
+function renderSync() {
+  const sync = S.data.sync || {};
+  $("sync-list").innerHTML = S.data.feed.periods.map(p => { const an = sync[p.n] || []; return `<div><b>${p.label}</b> ${an.length ? an.map(a => `<span class="a">${fmtc(a.clock)} ↔ ${fmt(a.video)}<button class="small" data-p="${p.n}" data-c="${a.clock}">×</button></span>`).join("") : '<span class="muted">not synced</span>'}</div>`; }).join("");
+  $("sync-list").querySelectorAll("button").forEach(b => b.onclick = async () => { S.data.sync = await api(`match/${S.matchId}/sync?period=${b.dataset.p}&clock=${b.dataset.c}`, { method:"DELETE" }); renderSync(); refreshEvents(); });
+}
+$("btn-anchor").onclick = async () => {
+  const clock = parseClock($("sync-clock").value); if (clock == null) return toast("clock like 0:00 or 10:00");
+  const period = +$("sync-period").value;
+  S.data.sync = await post(`match/${S.matchId}/sync`, { period, clock, video: P.time() });
+  renderSync(); refreshEvents(); toast(`Anchor Q${period} ${fmtc(clock)} set`);
+  // convenience: after anchoring 0:00 suggest 10:00 next
+  if (clock === 0) $("sync-clock").value = "10:00"; else { $("sync-clock").value = "0:00"; const o = $("sync-period"); if (o.selectedIndex < o.options.length - 1) o.selectedIndex++; }
+};
+
+// ---------- tags
+$("tag-team").onchange = fillTagPlayers;
+$("stat-btns").innerHTML = STATS.map(([k, l]) => `<button class="small" data-stat="${k}">${l}</button>`).join("");
+$("stat-btns").querySelectorAll("button").forEach(b => b.onclick = () => addTag(b.dataset.stat));
+async function addTag(stat) {
+  if (!S.data) return;
+  const video = P.time();
+  const gc = await api(`match/${S.matchId}/clock?video=${video}`);
+  const tag = await post(`match/${S.matchId}/tags`, { video, period: gc.period, clock: gc.clock, team: $("tag-team").value, personId: $("tag-player").value, stat });
+  S.data.tags.push(tag); renderTags(); renderEvents(); renderBox();
+  toast(`${(STATS.find(s => s[0] === stat) || [stat, stat])[1]} → #${playerNo(tag.personId)} ${playerName(tag.personId)} @ ${fmt(video)}`);
+}
+function renderTags() {
+  $("tag-body").innerHTML = (S.data.tags || []).slice().sort((a,b) => a.video - b.video).map(t => `<tr class="ev" data-video="${t.video}"><td>${t.period ? "Q" + t.period : ""}</td><td>${t.clock != null ? fmtc(t.clock) : ""}</td><td class="${t.team}">${t.team === "home" ? "H" : "A"}</td><td>${esc((STATS.find(s => s[0] === t.stat) || [t.stat, t.stat])[1])}</td><td>#${esc(playerNo(t.personId))} ${esc(playerName(t.personId))}</td><td class="muted">${fmt(t.video)}</td><td><button class="small" data-del="${t.id}">×</button></td></tr>`).join("");
+  $("tag-body").querySelectorAll("tr").forEach(tr => tr.onclick = e => { if (e.target.dataset.del) return; P.seek(+tr.dataset.video - 5); });
+  $("tag-body").querySelectorAll("button[data-del]").forEach(b => b.onclick = async () => { S.data.tags = await api(`match/${S.matchId}/tags/${b.dataset.del}`, { method:"DELETE" }); renderTags(); renderEvents(); renderBox(); });
+}
+
+// ---------- box score (feed + tags)
+function renderBox() {
+  const tags = S.data.tags || [];
+  const cnt = (pid, stat) => tags.filter(t => t.personId === pid && t.stat === stat).length;
+  const minutes = pid => { // from in/out tags, paired in video-time order; open interval runs to last tag
+    const ts = tags.filter(t => t.personId === pid && (t.stat === "in" || t.stat === "out")).sort((a,b) => a.video - b.video);
+    let tot = 0, inAt = null; for (const t of ts) { if (t.stat === "in" && inAt == null) inAt = t.video; if (t.stat === "out" && inAt != null) { tot += t.video - inAt; inAt = null; } }
+    return tot ? Math.round(tot / 60) : 0;
+  };
+  const tr = S.data.feed.tracked;
+  const html = ["home","away"].map(team => {
+    const m = S.data.feed.match[team];
+    const rows = players(team).map(p => {
+      const oreb = tr.oreb ? p.oreb : cnt(p.personId, "oreb"), dreb = tr.dreb ? p.dreb : cnt(p.personId, "dreb");
+      const fg2a = p.fg2_a + (p.fg2_a === p.fg2_m ? cnt(p.personId, "fga2") : 0), fg3a = p.fg3_a + (p.fg3_a === p.fg3_m ? cnt(p.personId, "fga3") : 0);
+      const min = tr.secs ? Math.round(p.secs / 60) : minutes(p.personId);
+      return `<tr><td>${esc(p.no)}</td><td>${esc(p.name)}</td><td class="n">${min || ""}</td><td class="n"><b>${p.pts}</b></td><td class="n">${p.ft_m}/${p.ft_a}</td><td class="n">${p.fg2_m}/${fg2a}</td><td class="n">${p.fg3_m}/${fg3a}</td>
+        <td class="n">${oreb}</td><td class="n">${dreb}</td><td class="n">${oreb + dreb}</td><td class="n">${tr.ast ? p.ast : cnt(p.personId, "ast")}</td><td class="n">${tr.stl ? p.stl : cnt(p.personId, "stl")}</td><td class="n">${tr.to ? p.to : cnt(p.personId, "to")}</td><td class="n">${tr.blk ? p.blk : cnt(p.personId, "blk")}</td><td class="n">${p.fouls}</td></tr>`;
+    }).join("");
+    return `<h3 class="${team}" style="margin:6px 0 4px">${esc(m.name)}</h3><table><thead><tr><th>#</th><th>Player</th><th class="n">Min</th><th class="n">Pts</th><th class="n">FT</th><th class="n">2P</th><th class="n">3P</th><th class="n">OR</th><th class="n">DR</th><th class="n">Reb</th><th class="n">Ast</th><th class="n">Stl</th><th class="n">TO</th><th class="n">Blk</th><th class="n">PF</th></tr></thead><tbody>${rows}</tbody></table>`;
+  }).join("");
+  $("tab-box").innerHTML = html + `<p class="muted" style="font-size:12px">Pts/FT/2P/3P made/PF from the official feed. Attempts, rebounds, assists, steals, TO, blocks and minutes come from your tags unless the scorer recorded them. <button class="small" id="btn-csv">Export CSV</button></p>`;
+  $("btn-csv").onclick = exportCsv;
+}
+function exportCsv() {
+  const lines = [["team","no","player","min","pts","ft","2p","3p","or","dr","ast","stl","to","blk","pf"].join(",")];
+  $("tab-box").querySelectorAll("table").forEach((tbl, i) => tbl.querySelectorAll("tbody tr").forEach(r => lines.push([i ? "away" : "home", ...[...r.cells].map(c => '"' + c.textContent.replace(/"/g, '""') + '"')].join(","))));
+  const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([lines.join("\n")], { type:"text/csv" })); a.download = `boxscore_${S.matchId}.csv`; a.click();
+}
+
+// ---------- header actions
+$("btn-load").onclick = () => { const id = +$("match-id").value; if (id) loadMatch(id).catch(e => toast(e.message)); };
+$("match-id").onkeydown = e => { if (e.key === "Enter") $("btn-load").click(); };
+$("btn-video").onclick = async () => { try { S.data.video = await post(`match/${S.matchId}/video`, { source: $("video-src").value }); mountPlayer(S.data.video); toast("video set"); } catch (e) { toast(e.message); } };
+$("btn-download").onclick = async () => { try { await post(`match/${S.matchId}/video/download`, {}); pollDl(); } catch (e) { toast(e.message); } };
+async function pollDl() {
+  const st = await api(`match/${S.matchId}/video/download`);
+  $("dl-status").textContent = st.state === "downloading" ? `downloading ${Math.round(st.progress * 100)}%` : st.state === "done" ? "downloaded ✓" : st.state === "error" ? "error: " + st.error : st.state;
+  if (st.state === "done") { S.data = await api(`match/${S.matchId}`); mountPlayer(S.data.video); }
+  else if (st.state !== "error" && st.state !== "idle") setTimeout(pollDl, 1500);
+}
+$("btn-clip").onclick = async () => { try { const r = await post(`match/${S.matchId}/clip`, { start: P.time() - 6, duration: 12, name: `clip_${fmt(P.time()).replace(":", "m")}` }); toast("saved " + r.path); } catch (e) { toast(e.message); } };
+document.querySelectorAll("[data-seek]").forEach(b => b.onclick = () => P.seek(P.time() + +b.dataset.seek));
+$("btn-play").onclick = () => P.toggle();
+$("rate").onchange = () => P.rate(+$("rate").value);
+document.querySelectorAll(".tabs button").forEach(b => b.onclick = () => { document.querySelectorAll(".tabs button").forEach(x => x.classList.toggle("active", x === b)); ["events","box","tags"].forEach(t => $("tab-" + t).classList.toggle("hidden", t !== b.dataset.tab)); $("ev-filter").classList.toggle("hidden", b.dataset.tab !== "events"); });
+
+// keyboard
+document.addEventListener("keydown", e => {
+  if (e.target && e.target.matches && e.target.matches("input, select, textarea")) return;
+  const k = e.key.toLowerCase();
+  if (k === " ") { e.preventDefault(); P.toggle(); }
+  else if (k === "arrowleft") P.seek(P.time() - (e.shiftKey ? 10 : 2));
+  else if (k === "arrowright") P.seek(P.time() + (e.shiftKey ? 10 : 2));
+  else if (k === "h") { $("tag-team").value = "home"; fillTagPlayers(); toast("team: home"); }
+  else if (k === "v") { $("tag-team").value = "away"; fillTagPlayers(); toast("team: away"); }
+  else if (KEYS[k]) addTag(KEYS[k]);
+});
+
+// clock display + follow
+setInterval(async () => {
+  if (!S.data) return;
+  const t = P.time(); $("vtime").textContent = fmt(t);
+  if (Object.values(S.data.sync || {}).some(a => a.length)) {
+    if (!S._gcBusy) { S._gcBusy = true; try { const gc = await api(`match/${S.matchId}/clock?video=${t}`); $("gtime").textContent = gc.period ? `Q${gc.period} ${fmtc(gc.clock)}` : "—"; } finally { S._gcBusy = false; } }
+  }
+  if ($("f-follow").checked) {
+    let cur = null; $("ev-body").querySelectorAll("tr.ev").forEach(tr => { const v = tr.dataset.video; tr.classList.remove("cur"); if (v !== "" && +v <= t + 0.5) cur = tr; });
+    if (cur && cur !== S._lastCur) { cur.classList.add("cur"); cur.scrollIntoView({ block:"center" }); S._lastCur = cur; } else if (cur) cur.classList.add("cur");
+  }
+}, 500);
+
+// boot
+const hm = location.hash.match(/match=(\d+)/); const initial = hm ? hm[1] : localStorage.getItem("bs.match");
+if (initial) { $("match-id").value = initial; loadMatch(+initial).catch(e => toast(e.message)); }
+</script>
+</body>
+</html>
