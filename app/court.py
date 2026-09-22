@@ -39,9 +39,9 @@ LANDMARKS: dict[str, tuple[float, float]] = {
 }
 
 
-# ---------- lens distortion (Brown radial model, k1, k2, centre) ----------
-# Pixel -> undistorted normalised pixel: r = |p - c| / f ; p_u = c + (p - c) * (1 + k1 r^2 + k2 r^4)
-# f = image half-diagonal so k's are dimensionless and well-conditioned.
+# ---------- lens distortion: division model (Fitzgibbon), well suited to strong barrel/fisheye ----------
+# r = |p - c| / f (f = image half-diagonal);  p_u = c + (p - c) / (1 + k1 r^2 + k2 r^4)
+# Barrel (fisheye) lenses give k1 < 0. The inverse (undistorted -> distorted) is solved 1-D numerically.
 
 def _undistort_pts(pts, dist):
     pts = np.asarray(pts, dtype=np.float64)
@@ -50,14 +50,14 @@ def _undistort_pts(pts, dist):
     cx, cy, k1, k2, f = dist["cx"], dist["cy"], dist["k1"], dist["k2"], dist["f"]
     d = pts - [cx, cy]
     r2 = (d ** 2).sum(axis=1) / (f * f)
-    fac = 1 + k1 * r2 + k2 * r2 * r2
-    return [cx, cy] + d * fac[:, None]
+    den = 1 + k1 * r2 + k2 * r2 * r2
+    den = np.where(np.abs(den) < 1e-6, 1e-6, den)
+    return [cx, cy] + d / den[:, None]
 
 
 def _distort_pt(x, y, dist):
-    """Inverse of _undistort_pts for one point: solve r_d (1 + k1 r_d^2 + k2 r_d^4) = r_u for r_d.
-    Bisection on [0, r_hi] where the model is still increasing, so it never diverges; if r_u lies
-    beyond the model's reach (fold-over) the point is clamped to the fold radius."""
+    """undistorted pixel -> distorted pixel. Solve r_d / (1 + k1 r_d^2 + k2 r_d^4) = r_u for r_d by
+    bisection on the increasing branch (never diverges); beyond the model's reach we clamp."""
     if not dist:
         return x, y
     cx, cy, k1, k2, f = dist["cx"], dist["cy"], dist["k1"], dist["k2"], dist["f"]
@@ -65,13 +65,15 @@ def _distort_pt(x, y, dist):
     ru = (ux * ux + uy * uy) ** 0.5
     if ru < 1e-12:
         return x, y
-    g = lambda r: r * (1 + k1 * r * r + k2 * r ** 4)  # noqa: E731
-    dg = lambda r: 1 + 3 * k1 * r * r + 5 * k2 * r ** 4  # noqa: E731
-    # find the end of the increasing branch
-    r_hi, step = 0.0, 0.02
-    while r_hi < 4.0 and dg(r_hi + step) > 0:
-        r_hi += step
-    if g(r_hi) <= ru:  # out of reach: clamp
+    g = lambda r: r / (1 + k1 * r * r + k2 * r ** 4)  # noqa: E731
+    # end of the increasing branch
+    r_hi, step, prev = 0.0, 0.01, 0.0
+    while r_hi < 3.0:
+        val = g(r_hi + step)
+        if val <= prev or (1 + k1 * (r_hi + step) ** 2 + k2 * (r_hi + step) ** 4) <= 0:
+            break
+        prev, r_hi = val, r_hi + step
+    if g(r_hi) <= ru:
         rd = r_hi
     else:
         lo, hi = 0.0, r_hi
@@ -111,9 +113,10 @@ def _fit(src, dst, w, h, fit_distortion: bool):
 
     from scipy.optimize import least_squares
 
-    # farthest possible normalised radius in the image (corner from a centre within the bounds)
-    r_max = ((0.7 * w) ** 2 + (0.7 * h) ** 2) ** 0.5 / f
-    rr = np.linspace(0, r_max, 40)
+    # the model must stay valid out to the frame corners (as seen from the fitted centre), + small margin
+    def rr_for(cx, cy):
+        r_max = max(np.hypot(x - cx, y - cy) for x in (0, w) for y in (0, h)) / f * 1.05
+        return np.linspace(0, r_max, 40)
 
     def residuals(x):
         k1, k2 = x[2], x[3] if fit_k2 else 0.0
@@ -121,17 +124,20 @@ def _fit(src, dst, w, h, fit_distortion: bool):
         u = _undistort_pts(src_a, dist)
         H = solve_H(u)
         if H is None:
-            return np.full(len(src) * 2 + len(rr), 1e3)
+            return np.full(len(src) * 2 + 40, 1e3)
         v = (H @ np.c_[u, np.ones(len(u))].T).T
         proj = v[:, :2] / v[:, 2:3]
-        # penalty: d/dr [r(1 + k1 r^2 + k2 r^4)] must stay > 0.2 over the whole frame (invertible, physical)
-        dg = 1 + 3 * k1 * rr ** 2 + 5 * k2 * rr ** 4
-        pen = np.maximum(0.0, 0.2 - dg) * 50.0
+        # penalty: the division model must stay increasing over the whole frame:
+        # d/dr [r / D(r)] > 0  <=>  D - r D' > 0  with D = 1 + k1 r^2 + k2 r^4  ->  1 - k1 r^2 - 3 k2 r^4 > 0
+        rr = rr_for(x[0], x[1])
+        dg = 1 - k1 * rr ** 2 - 3 * k2 * rr ** 4
+        den = 1 + k1 * rr ** 2 + k2 * rr ** 4
+        pen = (np.maximum(0.0, 0.15 - dg) + np.maximum(0.0, 0.15 - den)) * 50.0
         return np.concatenate([(proj - dst_a).ravel(), pen])
 
     x0 = np.array([w / 2, h / 2, 0.0, 0.0])
-    lo = [w * 0.3, h * 0.3, -0.6, -0.5 if fit_k2 else -1e-9]
-    hi = [w * 0.7, h * 0.7, 0.6, 0.5 if fit_k2 else 1e-9]
+    lo = [w * 0.25, h * 0.25, -3.0, -3.0 if fit_k2 else -1e-9]
+    hi = [w * 0.75, h * 0.75, 3.0, 3.0 if fit_k2 else 1e-9]
     res = least_squares(residuals, x0, bounds=(lo, hi), x_scale=[w * 0.1, h * 0.1, 0.1, 0.1])
     dist = {"cx": float(res.x[0]), "cy": float(res.x[1]), "k1": float(res.x[2]), "k2": float(res.x[3]) if fit_k2 else 0.0, "f": f}
     u = _undistort_pts(src_a, dist)

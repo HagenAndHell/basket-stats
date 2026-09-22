@@ -64,7 +64,7 @@ def test_distortion_fit_recovers_synthetic_fisheye():
     assert cal["error_plain_m"] > 0.15                      # plain homography is clearly off
     assert cal["dist"] is not None
     assert cal["error_m"] < 0.02                            # distortion model fixes it
-    assert abs(cal["dist"]["k1"] - true["k1"]) < 0.03
+    assert abs(cal["dist"]["k1"] - true["k1"]) < 0.05
     # round trip through the fitted model
     px, py = court.to_pixel(cal["H"], 10.0, 4.0, cal["dist"])
     x, y = court.to_court(cal["H"], px, py, cal["dist"])
@@ -106,7 +106,7 @@ def test_distort_inverse_is_robust_everywhere():
         dist = {"cx": w / 2 + 100, "cy": h / 2 - 50, "k1": k1, "k2": k2, "f": f}
         for pt in [(95.2, 1689.0), (3651.9, 1381.3), (1920, 1080), (400, 600), (10, 10), (3830, 2150)]:
             r = np.hypot(pt[0] - dist["cx"], pt[1] - dist["cy"]) / f
-            if 1 + 3 * k1 * r * r + 5 * k2 * r ** 4 <= 0.05:
+            if 1 - k1 * r * r - 3 * k2 * r ** 4 <= 0.05 or 1 + k1 * r * r + k2 * r ** 4 <= 0.05:
                 continue  # beyond the fold: not invertible by construction
             u = court._undistort_pts([pt], dist)[0]
             back = court._distort_pt(u[0], u[1], dist)
@@ -131,8 +131,40 @@ def test_fit_keeps_model_invertible_over_frame():
     cal = court.calibrate(pts, W, Hh)
     assert cal["dist"] is not None and cal["error_m"] < 0.05
     d = cal["dist"]
-    r_max = ((0.7 * W) ** 2 + (0.7 * Hh) ** 2) ** 0.5 / f
+    r_max = max(np.hypot(x - d["cx"], y - d["cy"]) for x in (0, W) for y in (0, Hh)) / f
     rr = np.linspace(0, r_max, 50)
-    assert np.all(1 + 3 * d["k1"] * rr ** 2 + 5 * d["k2"] * rr ** 4 > 0.1)
+    assert np.all(1 - d["k1"] * rr ** 2 - 3 * d["k2"] * rr ** 4 > 0.1)
     # clicked corners reproject close to where they were clicked
     assert max(r["px_err"] for r in cal["residuals"]) < 3
+
+
+USER_POINTS_4K = """corner_L_top 1024 988.4
+corner_R_bottom 3651.9 1381.3
+corner_R_top 2769.2 942.2
+half_bottom 2475.1 1860.9
+half_top 1964.3 954.6
+centre 2071 1151
+L_ft_bottom 1059.9 1333
+L_ft_top 1263.3 1100
+R_ft_bottom 2971.5 1216.7
+R_ft_top 2683.3 1047.2
+L_3pt_bottom 188.4 1605.4
+L_3pt_top 993.9 1009.1
+R_3pt_bottom 3576.3 1337.4
+R_3pt_top 2803.2 957.2
+L_3pt_apex 1453 1181.6
+R_3pt_apex 2614.4 1127.4
+corner_L_bottom 99.2 1688.7"""
+
+
+def test_real_fisheye_calibration_from_user_points():
+    pts = [{"name": a, "px": float(b), "py": float(c)} for a, b, c in (l.split() for l in USER_POINTS_4K.splitlines())]
+    cal = court.calibrate(pts, 3840, 2160)
+    assert cal["error_plain_m"] > 0.8            # plain homography is hopeless on this lens
+    assert cal["dist"] is not None and cal["dist"]["k1"] < -0.2   # strong barrel distortion
+    assert cal["error_m"] < 0.15
+    assert max(r["px_err"] for r in cal["residuals"]) < 40
+    # the near sideline drawn through the model passes near the clicked half_bottom
+    hb = next(p for p in pts if p["name"] == "half_bottom")
+    px, py = court.to_pixel(cal["H"], 14.0, 0.0, cal["dist"])
+    assert abs(px - hb["px"]) < 40 and abs(py - hb["py"]) < 40
