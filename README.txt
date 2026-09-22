@@ -56,6 +56,28 @@ Using it
 All data is stored under data/ (projects/<matchId>.json, videos/, clips/).
 
 
+Court tab (Phase 2: tracking)
+-----------------------------
+
+  Needs a local video (set a file path, or Download the YouTube video first).
+
+  1. Calibration: open "Court calibration", press "Grab frame at current time",
+     pick a landmark in the dropdown and click it in the frame. Do 4 or more
+     spread over the court (the far corners, half-court line ends, free-throw
+     lane corners, 3-pt/baseline intersections...). Save. The mean error in
+     metres is shown; under 0.3 m is good.
+  2. Tracking: "Run 60 s from here" for a quick test, "Run on whole video" for
+     the full game (background job; progress shown). Data lands in data/tracks/.
+  3. The 2D court follows the video: one dot per tracked player, ID label, ball
+     in orange, optional 2 s trails.
+
+  Speed: the default (yolo11s, 1280 px, every 2nd frame) runs ~5-10 fps on CPU,
+  i.e. a 70 min game takes several hours. First run downloads the model (~20 MB).
+  GPU: Ultralytics uses CUDA automatically on NVIDIA. On AMD (Windows) install
+  torch-directml (`pip install torch-directml`) and set device via
+  BASKET_STATS_DEVICE=dml (experimental), or accept CPU speed and run overnight.
+
+
 Development
 -----------
 
@@ -67,8 +89,9 @@ ROADMAP
 -------
 
   Phase 1  (this)   sync tool, event navigation, box score, tagging, clips
-  Phase 2           YOLO player/ball detection + tracking, court corner calibration
-                    -> 2D positions, heatmaps, on-court detection for minutes
+  Phase 2  (wip)    YOLO player/ball detection + tracking, court calibration,
+                    2D court view. Next: team colours, track->player identity,
+                    minutes on court, heatmaps
   Phase 3           shot chart: feed shots for time/player, tracked ball for location,
                     miss candidates proposed for confirmation
   Phase 4           tactics view: 2D court playback of possessions

@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import feed, video
+from . import court, feed, track, video
 from .project import Project
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -18,6 +18,7 @@ DATA = Path(os.environ.get("BASKET_STATS_DATA", ROOT / "data"))
 PROJECTS = DATA / "projects"
 VIDEOS = DATA / "videos"
 CLIPS = DATA / "clips"
+TRACKS = DATA / "tracks"
 
 app = FastAPI(title="basket-stats")
 
@@ -33,6 +34,8 @@ async def serialize_api(request, call_next):
             return await call_next(request)
     return await call_next(request)
 _downloads: dict[str, video.Download] = {}
+_trackjobs: dict[str, track.TrackJob] = {}
+_trackcache: dict[str, tuple[float, dict, list]] = {}  # matchId -> (mtime, meta, frames)
 
 
 def project(match_id: int) -> Project:
@@ -203,6 +206,142 @@ def make_clip(match_id: int, c: ClipIn):
     out = CLIPS / str(match_id) / f"{safe}_{int(c.start)}s.mp4"
     video.export_clip(v["local"], c.start, c.duration, out)
     return {"path": str(out)}
+
+
+# ---------- court calibration
+class CalibIn(BaseModel):
+    points: list[dict]   # [{"name": landmark, "px": .., "py": ..}]
+
+
+@app.get("/api/court/landmarks")
+def landmarks():
+    return {"landmarks": court.LANDMARKS, "length": court.LENGTH, "width": court.WIDTH,
+            "ft_line": court.FT_LINE, "lane_w": court.LANE_W, "arc_r": court.ARC_R, "basket_x": court.BASKET_X, "corner3_y": court.CORNER3_Y}
+
+
+@app.post("/api/match/{match_id}/calibration")
+def set_calibration(match_id: int, c: CalibIn):
+    pr = project(match_id)
+    H = court.homography(c.points)
+    pr.data["calibration"] = {"points": c.points, "H": H,
+                              "error_m": court.reprojection_error(H, c.points) if H else None}
+    pr.save()
+    return pr.data["calibration"]
+
+
+@app.get("/api/match/{match_id}/frame")
+def frame_at(match_id: int, t: float = Query(...), width: int = 1280):
+    """JPEG of the local video at time t (for clicking landmarks)."""
+    import cv2
+    from fastapi.responses import Response
+    pr = project(match_id)
+    v = pr.data.get("video") or {}
+    if not v.get("local"):
+        raise HTTPException(400, "needs a local/downloaded video")
+    cap = cv2.VideoCapture(v["local"])
+    cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000)
+    ok, fr = cap.read()
+    cap.release()
+    if not ok:
+        raise HTTPException(404, "no frame")
+    h, w = fr.shape[:2]
+    if width and w > width:
+        fr = cv2.resize(fr, (width, int(h * width / w)))
+    ok, buf = cv2.imencode(".jpg", fr, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    return Response(buf.tobytes(), media_type="image/jpeg", headers={"X-Source-Width": str(w), "X-Source-Height": str(h)})
+
+
+# ---------- tracking
+class TrackIn(BaseModel):
+    start: float = 0.0
+    end: float | None = None
+    stride: int = 2
+    imgsz: int = 1280
+    model: str = "yolo11s.pt"
+
+
+@app.post("/api/match/{match_id}/track")
+def start_track(match_id: int, t: TrackIn):
+    pr = project(match_id)
+    v = pr.data.get("video") or {}
+    if not v.get("local"):
+        raise HTTPException(400, "needs a local/downloaded video")
+    key = str(match_id)
+    j = _trackjobs.get(key)
+    if j and j.thread.is_alive():
+        return j.status
+    j = _trackjobs[key] = track.TrackJob(v["local"], TRACKS / f"{match_id}.jsonl.gz", start=t.start, end=t.end,
+                                          stride=t.stride, imgsz=t.imgsz, model=t.model)
+    return j.status
+
+
+@app.get("/api/match/{match_id}/track")
+def track_status(match_id: int):
+    j = _trackjobs.get(str(match_id))
+    path = TRACKS / f"{match_id}.jsonl.gz"
+    st = dict(j.status) if j else {"state": "idle"}
+    st["available"] = path.exists()
+    return st
+
+
+@app.delete("/api/match/{match_id}/track")
+def stop_track(match_id: int):
+    j = _trackjobs.get(str(match_id))
+    if j:
+        j.stop()
+    return {"ok": True}
+
+
+def _tracks(match_id: int):
+    path = TRACKS / f"{match_id}.jsonl.gz"
+    if not path.exists():
+        raise HTTPException(404, "no tracking data — run tracking first")
+    mt = path.stat().st_mtime
+    c = _trackcache.get(str(match_id))
+    if not c or c[0] != mt:
+        meta, frames = track.read_tracks(path)
+        c = _trackcache[str(match_id)] = (mt, meta, frames)
+    return c[1], c[2]
+
+
+@app.get("/api/match/{match_id}/positions")
+def positions(match_id: int, t0: float = Query(...), t1: float = Query(...)):
+    """Tracked positions between video times t0..t1, in pixels and (if calibrated) court metres."""
+    import bisect
+    pr = project(match_id)
+    meta, frames = _tracks(match_id)
+    H = (pr.data.get("calibration") or {}).get("H")
+    ts = [f["t"] for f in frames]
+    i0, i1 = bisect.bisect_left(ts, t0), bisect.bisect_right(ts, t1)
+    out = []
+    for f in frames[i0:i1]:
+        ps = []
+        for p in f["p"]:
+            fx, fy = court.foot_point(p[1:5])
+            item = {"id": p[0], "box": p[1:5], "foot": [round(fx, 1), round(fy, 1)]}
+            if H:
+                cx, cy = court.to_court(H, fx, fy)
+                item["court"] = [round(cx, 2), round(cy, 2)]
+                item["on"] = court.on_court(cx, cy)
+            ps.append(item)
+        b = None
+        if f["b"]:
+            bx, by = (f["b"][0] + f["b"][2]) / 2, (f["b"][1] + f["b"][3]) / 2
+            b = {"box": f["b"][:4], "c": [round(bx, 1), round(by, 1)]}
+        out.append({"t": f["t"], "p": ps, "b": b})
+    return {"meta": meta, "frames": out}
+
+
+@app.get("/api/match/{match_id}/track/summary")
+def track_summary(match_id: int):
+    meta, frames = _tracks(match_id)
+    ids = {}
+    for f in frames:
+        for p in f["p"]:
+            d = ids.setdefault(p[0], {"id": p[0], "first": f["t"], "last": f["t"], "n": 0})
+            d["last"] = f["t"]; d["n"] += 1
+    return {"meta": meta, "frames": len(frames), "t0": frames[0]["t"] if frames else None, "t1": frames[-1]["t"] if frames else None,
+            "tracks": sorted(ids.values(), key=lambda d: -d["n"])}
 
 
 @app.get("/api/health")

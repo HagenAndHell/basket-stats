@@ -23,7 +23,7 @@ const check = (name, cond, detail = "") => { console.log(`${cond ? "PASS" : "FAI
     const send = (method, params = {}) => new Promise(r => { const i = ++id; pending[i] = r; sock.send(JSON.stringify({ id: i, method, params })); });
     sock.on("message", m => { const d = JSON.parse(m); if (d.id && pending[d.id]) { pending[d.id](d.result); delete pending[d.id]; } else if (d.method === "Runtime.exceptionThrown") errors.push(d.params.exceptionDetails.exception?.description || JSON.stringify(d.params)); });
     await new Promise(r => sock.on("open", r));
-    await send("Runtime.enable"); await send("Page.enable");
+    await send("Runtime.enable"); await send("Page.enable"); await send("Network.enable"); await send("Network.setCacheDisabled", { cacheDisabled: true });
     await send("Emulation.setDeviceMetricsOverride", { width: 1600, height: 900, deviceScaleFactor: 1, mobile: false });
     const ev = async expr => (await send("Runtime.evaluate", { expression: expr, returnByValue: true, awaitPromise: true })).result.value;
     const waitFor = async (expr, ms = 20000) => { const t0 = Date.now(); while (Date.now() - t0 < ms) { if (await ev(expr)) return true; await sleep(300); } return false; };
@@ -32,7 +32,7 @@ const check = (name, cond, detail = "") => { console.log(`${cond ? "PASS" : "FAI
     check("match loads", await waitFor("document.getElementById('match-title').textContent.includes('116–70')"));
     check("events listed", await waitFor("document.querySelectorAll('#ev-body tr').length > 100"));
     check("events unsynced initially", await ev("[...document.querySelectorAll('#ev-body tr')].every(r => r.classList.contains('nosync'))"));
-    check("youtube player mounted", await waitFor("!!document.querySelector('#player iframe')", 15000));
+    check("player mounted (YouTube iframe or local <video>)", await waitFor("!!document.querySelector('#player iframe, #player video')", 15000));
     check("period selector Q1-Q4", await ev("[...document.querySelectorAll('#sync-period option')].map(o=>o.textContent).join()") === "Q1,Q2,Q3,Q4");
 
     // sync Q1 via UI (player time is 0 in headless; fake with P.time override)
@@ -100,6 +100,33 @@ const check = (name, cond, detail = "") => { console.log(`${cond ? "PASS" : "FAI
     check("tag removed", await ev("S.data.tags.length") === 0);
     await ev("document.querySelectorAll('#sync-list button').forEach(b=>b.click())"); await sleep(800);
     check("anchors removed", await waitFor("document.getElementById('sync-list').textContent.includes('not synced') && !document.getElementById('sync-list').textContent.includes('↔')"));
+
+    // ---- Court tab: calibration via clicks on the frame + tracked positions on the 2D court
+    await ev("document.querySelector('[data-tab=court]').click()");
+    check("court canvas visible", await ev("document.getElementById('court2d').offsetHeight > 0"));
+    check("tracking status shows data", await waitFor("/available|done/.test(document.getElementById('track-status').textContent)"));
+    check("landmark list populated", await ev("document.getElementById('lm-select').options.length") >= 20);
+    await ev("document.getElementById('calib').open = true; P.time = () => 30; document.getElementById('btn-frame').click()");
+    check("frame grabbed", await waitFor("document.getElementById('calib-img').naturalWidth > 0", 15000));
+    // click 5 landmarks at chosen positions (a plausible perspective quadrilateral)
+    const clicks = [["corner_L_top", 0.245, 0.454], ["corner_R_top", 0.812, 0.424], ["corner_L_bottom", 0.05, 0.85], ["corner_R_bottom", 0.97, 0.88], ["centre", 0.55, 0.62]];
+    for (const [name, fx, fy] of clicks) {
+      await ev(`(()=>{const img=document.getElementById('calib-img'); const r=img.getBoundingClientRect(); document.getElementById('lm-select').value='${name}'; img.dispatchEvent(new MouseEvent('click',{clientX:r.left+r.width*${fx}, clientY:r.top+r.height*${fy}, bubbles:true}));})()`);
+    }
+    check("5 calibration points listed", await ev("calibPts.length") === 5, await ev("calibPts.length"));
+    check("clicked px scaled to source resolution", await ev("calibPts.find(p=>p.name==='corner_R_bottom').px") > 1700);
+    await ev("document.getElementById('btn-calib-save').click()");
+    check("calibration saved", await waitFor("S.data.calibration && S.data.calibration.H"));
+    check("calibration status shown", await ev("document.getElementById('calib-status').textContent").then(t => /calibrated \(5 pts/.test(t)));
+    await ev("P.time = () => 31.0"); await sleep(1500);
+    await ev("TRK = { frames: [], t0: null, t1: null }; ensureTracks(31.0)"); await sleep(1000); await ev("drawCourt(31.0)");
+    check("court view shows players", await waitFor("/\\d+ players on court/.test(document.getElementById('court-info').textContent)", 8000), await ev("document.getElementById('court-info').textContent"));
+    await ev("drawCourt(31.0)");
+    const px = await ev("(()=>{const c=document.getElementById('court2d'); const d=c.getContext('2d').getImageData(0,0,c.width,c.height).data; let n=0; for(let i=0;i<d.length;i+=4){ if(Math.abs(d[i]-d[i+1])>60 || Math.abs(d[i+1]-d[i+2])>60) n++; } return n;})()");
+    check("coloured dots drawn on court", px > 50, px);
+    // calibration persists across reload of the match
+    await ev("loadMatch(8439241)"); await sleep(1500);
+    check("calibration persisted", await ev("S.data.calibration.points.length") === 5);
 
     check("no uncaught JS errors", errors.length === 0, errors.join(" | "));
     console.log(failures ? `\n${failures} FAILED` : "\nALL PASSED");
