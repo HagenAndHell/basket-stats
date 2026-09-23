@@ -169,7 +169,8 @@ def _holder(frame: dict, pad: float = 0.35) -> int | None:
     return best[1] if best else None
 
 
-def propose(frames: list[dict], t: float, H, dist, end: str | None, before: float = 3.5, after: float = 0.8) -> dict:
+def propose(frames: list[dict], t: float, H, dist, end: str | None, before: float = 3.5, after: float = 0.8,
+            identities: dict | None = None, shooter_id: str | None = None) -> dict:
     """Guess the shooter and the release moment for a shot logged at video time t.
 
     Looks at tracked frames in [t-before, t+after]. Release = the last moment before t+after at which
@@ -205,11 +206,19 @@ def propose(frames: list[dict], t: float, H, dist, end: str | None, before: floa
                 break
     frame_t = release_t if release_t is not None else max(ts[i0], t - 1.5)
     fr = win[min(range(len(win)), key=lambda i: abs(win[i]["t"] - frame_t))]
+    # identities learned from earlier confirmations: if exactly one visible track is known to be the
+    # feed's shooter, that beats a ball-less guess (and confirms / overrides a weak "closest player" one)
+    ident = identities or {}
+    if shooter_id:
+        known = [p[0] for p in fr["p"] if identity_of(ident, p[0]) == shooter_id]
+        if len(known) == 1 and (guess is None or how != "ball left this player's hands"):
+            guess, how = known[0], "this track was confirmed as the shooter before"
 
     players = []
     for p in fr["p"]:
         fx, fy = court.foot_point(p[1:5])
-        item = {"id": p[0], "box": p[1:5], "foot": [round(fx, 1), round(fy, 1)], "guess": p[0] == guess}
+        item = {"id": p[0], "box": p[1:5], "foot": [round(fx, 1), round(fy, 1)], "guess": p[0] == guess,
+                "personId": identity_of(ident, p[0])}
         if H:
             cx, cy = court.to_court(H, fx, fy, dist)
             item["court"] = [round(cx, 2), round(cy, 2)]
@@ -221,3 +230,22 @@ def propose(frames: list[dict], t: float, H, dist, end: str | None, before: floa
     ball = [[f["t"], round((f["b"][0] + f["b"][2]) / 2, 1), round((f["b"][1] + f["b"][3]) / 2, 1)] for f in win if f.get("b")]
     return {"frame_t": fr["t"], "players": players, "ball": ball, "guess_id": guess, "release_t": release_t,
             "how": how or "ball not detected — no guess"}
+
+
+# ---------- track id -> player identity, learned from confirmed shots
+def learn_identity(identities: dict, track_id: int, person_id: str) -> dict:
+    """One vote: track `track_id` was confirmed to be `person_id`. identities: {"<tid>": {"<pid>": n}}."""
+    votes = identities.setdefault(str(track_id), {})
+    votes[str(person_id)] = votes.get(str(person_id), 0) + 1
+    return identities
+
+
+def identity_of(identities: dict, track_id: int) -> str | None:
+    """Majority vote for a track id, None if unknown or tied."""
+    votes = identities.get(str(track_id))
+    if not votes:
+        return None
+    best = sorted(votes.items(), key=lambda kv: -kv[1])
+    if len(best) > 1 and best[0][1] == best[1][1]:
+        return None
+    return best[0][0]

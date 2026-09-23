@@ -102,6 +102,12 @@ Shots tab (Phase 3: shot chart)
      instead of aiming. If the ball was detected, the app finds the moment it
      left a player's hands, jumps the frame there and marks that player with
      a yellow star - press Enter to accept, or click someone else.
+     The numbers on the boxes are tracker ids (arbitrary; a player gets a new
+     one every time the tracker loses him). Each time you confirm a box as the
+     shooter, the app learns "this track = this player" (the feed names the
+     shooter), and from then on that box - and its dot on the Court tab - shows
+     the shirt number and name, and is proposed automatically when that player
+     shoots again. Re-running tracking renumbers the tracks and forgets these.
   2. Chart: half court, basket at the top. Green dot = made, red cross = missed,
      orange = the location disagrees with the feed (a "2" beyond the arc or a
      "3" inside it) - check the click or the scorer. Drag a marker to correct

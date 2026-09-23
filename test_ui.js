@@ -198,6 +198,7 @@ const check = (name, cond, detail = "") => { console.log(`${cond ? "PASS" : "FAI
     check("shot locations persisted in project", await getJSON(`${BASE}/api/match/8439241`).then(d => d.shots !== undefined));
 
     // ---- tracking-assisted locate: tracked players boxed on the frame, click a box -> its foot point
+    await new Promise((res, rej) => { const rq = http.request(`${BASE}/api/match/8439241/identities`, { method: 'DELETE' }, r => { r.resume(); r.on('end', res); }); rq.on('error', rej); rq.end(); });
     // sync so that the first Q1 shot (0:54) lands inside the tracked window (25..40 s): video = -22 + clock
     await ev("P.time = () => 100; document.getElementById('sync-clock').value='2:02'; document.getElementById('sync-period').value='1'; document.getElementById('btn-anchor').click()"); await sleep(800);
     await ev("P.time = () => 30; document.getElementById('sync-clock').value='0:52'; document.getElementById('sync-period').value='1'; document.getElementById('btn-anchor').click()"); await sleep(800);
@@ -209,8 +210,15 @@ const check = (name, cond, detail = "") => { console.log(`${cond ? "PASS" : "FAI
     const tp = await ev("CF.prop.players[0]");
     await ev(`(()=>{const cv=document.getElementById('cf-canvas'); const r=cv.getBoundingClientRect(); cfFit(); const ix=(${tp.box[0]}+${tp.box[2]})/2, iy=(${tp.box[1]}+${tp.box[3]})/2; const x=r.left+CF.ox+ix*CF.scale, y=r.top+CF.oy+iy*CF.scale; cv.dispatchEvent(new MouseEvent('mousedown',{clientX:x, clientY:y, bubbles:true})); cv.dispatchEvent(new MouseEvent('mouseup',{clientX:x, clientY:y, bubbles:true}));})()`);
     check("click inside a tracked box snaps to that player's feet", await waitFor(`(()=>{const a=SC.data.attempts.find(a => a.key === '${firstKey}'); return a.located && Math.abs(a.px - ${tp.foot[0]}) < 0.01 && Math.abs(a.py - ${tp.foot[1]}) < 0.01})()`, 5000), await ev(`JSON.stringify(SC.data.attempts.find(a => a.key === '${firstKey}'))`));
+    // the confirmation taught the app who track ${tp.id} is: the label on that box now shows the shirt number/name
+    const ids = await getJSON(`${BASE}/api/match/8439241/identities`);
+    const shooterPid = await ev(`SC.data.attempts.find(a => a.key === '${firstKey}').personId`);
+    check("identity learned from the confirmation", ids[String(tp.id)] && ids[String(tp.id)].personId === shooterPid, JSON.stringify(ids));
+    await sleep(900); await ev(`locateShot('${firstKey}')`); await waitFor(`CF.shot && CF.shot.key === '${firstKey}' && CF.prop && CF.prop.players.some(q => q.id === ${tp.id} && q.personId)`, 8000);
+    check("box now labelled with the player", await ev(`(()=>{const q=CF.prop.players.find(q => q.id === ${tp.id}); return trackLabel(q)})()`).then(l => /^#\d* \S+/.test(l)), await ev(`(()=>{const q=CF.prop.players.find(q => q.id === ${tp.id}); return trackLabel(q)})()`));
+    check("known shooter proposed as the guess", await ev(`CF.prop.guess_id === ${tp.id} && !document.getElementById('cf-accept').classList.contains('hidden')`), await ev("JSON.stringify([CF.prop.guess_id, CF.prop.how])"));
     await ev("document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape', bubbles:true}))");
-    await ev(`api('match/'+S.matchId+'/shots/${firstKey}', {method:'DELETE'})`); await sleep(400);
+    await ev(`api('match/'+S.matchId+'/shots/${firstKey}', {method:'DELETE'})`); await ev("api('match/'+S.matchId+'/identities', {method:'DELETE'})"); await sleep(400);
     await ev("document.querySelectorAll('#sync-list button').forEach(b=>b.click())"); await sleep(600);
 
     check("no uncaught JS errors", errors.length === 0, errors.join(" | "));

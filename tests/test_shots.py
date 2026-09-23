@@ -196,3 +196,63 @@ def test_propose_api_uses_calibration_and_end(client, tmp_path, monkeypatch):
     assert client.get("/api/match/8439241/shots/nokey/propose", params={"t": 6.5}).status_code == 200
     (tr / "8439241.jsonl.gz").unlink()
     assert client.get(f"/api/match/8439241/shots/{key}/propose", params={"t": 6.5}).status_code == 404
+
+
+def test_identity_votes():
+    ident = {}
+    shots.learn_identity(ident, 7, "111")
+    shots.learn_identity(ident, 7, "222")
+    assert shots.identity_of(ident, 7) is None            # tie
+    shots.learn_identity(ident, 7, "111")
+    assert shots.identity_of(ident, 7) == "111"
+    assert shots.identity_of(ident, 8) is None
+
+
+def test_propose_uses_learned_identity_without_ball():
+    fr = _frames_with_shot()
+    for f in fr:
+        f["b"] = None
+    ident = {"2": {"555": 2}}
+    p = shots.propose(fr, 6.5, None, None, None, identities=ident, shooter_id="555")
+    assert p["guess_id"] == 2 and "confirmed" in p["how"]
+    assert next(x for x in p["players"] if x["id"] == 2)["personId"] == "555"
+    assert next(x for x in p["players"] if x["id"] == 1)["personId"] is None
+    # a solid ball-release guess is not overridden by identity
+    fr = _frames_with_shot()
+    p = shots.propose(fr, 6.5, None, None, None, identities=ident, shooter_id="555")
+    assert p["guess_id"] == 1
+    # unknown shooter or several candidates -> no identity guess
+    assert shots.propose(fr[:1] and [dict(f, b=None) for f in fr], 6.5, None, None, None, identities=ident, shooter_id="999")["guess_id"] is None
+
+
+def test_api_learns_identity_from_confirmed_shot(client, tmp_path):
+    import gzip, json as _json
+    client.get("/api/match/8439241")
+    tr = tmp_path / "tracks"; tr.mkdir()
+    with gzip.open(tr / "8439241.jsonl.gz", "wt") as fh:
+        fh.write(_json.dumps({"meta": {}}) + "\n")
+        for f in _frames_with_shot():
+            f["b"] = None
+            fh.write(_json.dumps(f) + "\n")
+    pts = [{"name": "corner_L_bottom", "px": 100, "py": 900}, {"name": "corner_R_bottom", "px": 2900, "py": 900},
+           {"name": "corner_R_top", "px": 2900, "py": -600}, {"name": "corner_L_top", "px": 100, "py": -600}]
+    client.post("/api/match/8439241/calibration", json={"points": pts, "width": 3000, "height": 1000, "fit_distortion": False})
+    att = client.get("/api/match/8439241/shots").json()["attempts"]
+    shooter = next(a for a in att if a["personId"])
+    same = [a for a in att if a["personId"] == shooter["personId"] and a["shot"] != "ft"]
+    assert len(same) >= 2
+    # confirm shot 1 with track 2 -> identity learned
+    d = client.put(f"/api/match/8439241/shots/{same[0]['key']}", json={"px": 820, "py": 430, "track_id": 2}).json()
+    ids = client.get("/api/match/8439241/identities").json()
+    assert ids["2"]["personId"] == shooter["personId"]
+    # next shot by the same player: proposal names track 2 even without a ball
+    p = client.get(f"/api/match/8439241/shots/{same[1]['key']}/propose", params={"t": 6.5}).json()
+    assert p["guess_id"] == 2 and next(x for x in p["players"] if x["id"] == 2)["personId"] == shooter["personId"]
+    # positions endpoint carries the identity for the 2D court
+    pos = client.get("/api/match/8439241/positions", params={"t0": 4.0, "t1": 4.1}).json()
+    p2 = next(x for x in pos["frames"][0]["p"] if x["id"] == 2)
+    assert p2["personId"] == shooter["personId"] and "personId" not in next(x for x in pos["frames"][0]["p"] if x["id"] == 1)
+    # location without track_id learns nothing
+    other = next(a for a in att if a["personId"] and a["personId"] != shooter["personId"] and a["shot"] != "ft")
+    client.put(f"/api/match/8439241/shots/{other['key']}", json={"px": 500, "py": 420})
+    assert client.get("/api/match/8439241/identities").json() == ids

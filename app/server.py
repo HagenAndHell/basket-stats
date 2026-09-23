@@ -267,6 +267,7 @@ class ShotLocIn(BaseModel):
     py: float | None = None
     x: float | None = None      # court metres directly (e.g. dragged on the 2D court)
     y: float | None = None
+    track_id: int | None = None  # tracked player whose feet were used -> learns track -> player identity
 
 
 class EndsIn(BaseModel):
@@ -306,6 +307,11 @@ def set_shot_location(match_id: int, key: str, loc: ShotLocIn):
         raise HTTPException(422, "give px,py or x,y")
     if not court.on_court(x, y, margin=2.0):
         raise HTTPException(400, f"that point is off the court ({x:.1f}, {y:.1f} m)")
+    if loc.track_id is not None:
+        entry["track_id"] = loc.track_id
+        a = next((a for a in shots.attempts_from(pr.data.get("feed"), pr.data.get("tags") or []) if a["key"] == key), None)
+        if a and a.get("personId"):
+            shots.learn_identity(pr.data.setdefault("identities", {}), loc.track_id, a["personId"])
     pr.data.setdefault("shots", {})[key] = entry
     pr.save()
     return _shot_chart(pr)
@@ -330,7 +336,25 @@ def propose_shot(match_id: int, key: str, t: float = Query(...)):
     a = next((a for a in att if a["key"] == key), None)
     ends = pr.data.get("ends") or shots.infer_ends(att, pr.data.get("shots") or {})
     end = shots.end_for(ends, a["team"], a["period"]) if a and a.get("team") else None
-    return shots.propose(frames, t, cal.get("H"), cal.get("dist"), end)
+    return shots.propose(frames, t, cal.get("H"), cal.get("dist"), end,
+                         identities=pr.data.get("identities") or {}, shooter_id=a.get("personId") if a else None)
+
+
+@app.delete("/api/match/{match_id}/identities")
+def clear_identities(match_id: int):
+    """Forget all learned track -> player identities (e.g. after re-running tracking, which renumbers tracks)."""
+    pr = project(match_id)
+    pr.data.pop("identities", None)
+    pr.save()
+    return {}
+
+
+@app.get("/api/match/{match_id}/identities")
+def get_identities(match_id: int):
+    """track id -> player, as learned from confirmed shots (majority vote per track)."""
+    pr = project(match_id)
+    ident = pr.data.get("identities") or {}
+    return {tid: {"personId": shots.identity_of(ident, int(tid)), "votes": v} for tid, v in ident.items()}
 
 
 @app.put("/api/match/{match_id}/ends")
@@ -380,6 +404,8 @@ class TrackIn(BaseModel):
 @app.post("/api/match/{match_id}/track")
 def start_track(match_id: int, t: TrackIn):
     pr = project(match_id)
+    if pr.data.pop("identities", None) is not None:  # new run = new track ids
+        pr.save()
     v = pr.data.get("video") or {}
     if not v.get("local"):
         raise HTTPException(400, "needs a local/downloaded video")
@@ -429,6 +455,7 @@ def positions(match_id: int, t0: float = Query(...), t1: float = Query(...)):
     meta, frames = _tracks(match_id)
     cal = pr.data.get("calibration") or {}
     H, dist = cal.get("H"), cal.get("dist")
+    ident = pr.data.get("identities") or {}
     ts = [f["t"] for f in frames]
     i0, i1 = bisect.bisect_left(ts, t0), bisect.bisect_right(ts, t1)
     out = []
@@ -437,6 +464,9 @@ def positions(match_id: int, t0: float = Query(...), t1: float = Query(...)):
         for p in f["p"]:
             fx, fy = court.foot_point(p[1:5])
             item = {"id": p[0], "box": p[1:5], "foot": [round(fx, 1), round(fy, 1)]}
+            pid = shots.identity_of(ident, p[0])
+            if pid:
+                item["personId"] = pid
             if H:
                 cx, cy = court.to_court(H, fx, fy, dist)
                 item["court"] = [round(cx, 2), round(cy, 2)]
