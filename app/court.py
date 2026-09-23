@@ -135,10 +135,26 @@ def _fit(src, dst, w, h, fit_distortion: bool):
         pen = (np.maximum(0.0, 0.15 - dg) + np.maximum(0.0, 0.15 - den)) * 50.0
         return np.concatenate([(proj - dst_a).ravel(), pen])
 
-    x0 = np.array([w / 2, h / 2, 0.0, 0.0])
     lo = [w * 0.25, h * 0.25, -3.0, -3.0 if fit_k2 else -1e-9]
     hi = [w * 0.75, h * 0.75, 3.0, 3.0 if fit_k2 else 1e-9]
-    res = least_squares(residuals, x0, bounds=(lo, hi), x_scale=[w * 0.1, h * 0.1, 0.1, 0.1])
+
+    def cost(x):
+        r = residuals(x)
+        return float((r * r).sum())
+
+    # 1) coarse, deterministic sweep over k1 (centre at frame centre, k2 = 0) to find the basin
+    grid = np.linspace(-1.5, 0.5, 41)
+    best_k1 = min(grid, key=lambda k: cost([w / 2, h / 2, k, 0.0]))
+    # 2) local refinement from the best grid point and its neighbours
+    best = None
+    for k_start in (best_k1, best_k1 - 0.05, best_k1 + 0.05):
+        x0 = np.array([w / 2, h / 2, float(np.clip(k_start, lo[2], hi[2])), 0.0])
+        r = least_squares(residuals, x0, bounds=(lo, hi), x_scale=[w * 0.1, h * 0.1, 0.1, 0.1],
+                          ftol=1e-12, xtol=1e-12, gtol=1e-12, max_nfev=2000)
+        c = cost(r.x)
+        if best is None or c < best[0]:
+            best = (c, r)
+    res = best[1]
     dist = {"cx": float(res.x[0]), "cy": float(res.x[1]), "k1": float(res.x[2]), "k2": float(res.x[3]) if fit_k2 else 0.0, "f": f}
     u = _undistort_pts(src_a, dist)
     H1 = solve_H(u)
