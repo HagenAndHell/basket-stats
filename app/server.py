@@ -10,7 +10,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import court, feed, track, video
+from . import court, feed, shots, track, video
 from .project import Project
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -259,6 +259,75 @@ def calibration_outline(match_id: int):
         raise HTTPException(404, "not calibrated")
     H, dist = cal["H"], cal.get("dist")
     return {"lines": [[list(court.to_pixel(H, x, y, dist)) for x, y in seg] for seg in court.court_lines()]}
+
+
+# ---------- shot chart
+class ShotLocIn(BaseModel):
+    px: float | None = None     # pixel in the calibrated frame (converted with the calibration), or
+    py: float | None = None
+    x: float | None = None      # court metres directly (e.g. dragged on the 2D court)
+    y: float | None = None
+
+
+class EndsIn(BaseModel):
+    home_first: str | None = None   # "L" | "R" | None (= infer)
+
+
+def _shot_chart(pr: Project) -> dict:
+    located = pr.data.get("shots") or {}
+    att = shots.attempts_from(pr.data.get("feed"), pr.data.get("tags") or [])
+    ends = pr.data.get("ends") or shots.infer_ends(att, located)
+    att = shots.with_locations(att, located, ends)
+    for a in att:
+        if a["src"] == "feed":
+            a["video"] = pr.clock_to_video(a["period"], a["clock"])
+    return {"attempts": att, "ends": ends, "summary": shots.summary(att),
+            "court": {"length": court.LENGTH, "width": court.WIDTH, "corner3_x": shots.CORNER3_X}}
+
+
+@app.get("/api/match/{match_id}/shots")
+def get_shots(match_id: int):
+    return _shot_chart(project(match_id))
+
+
+@app.put("/api/match/{match_id}/shots/{key}")
+def set_shot_location(match_id: int, key: str, loc: ShotLocIn):
+    pr = project(match_id)
+    if loc.x is not None and loc.y is not None:
+        x, y = loc.x, loc.y
+        entry = {"x": round(x, 2), "y": round(y, 2)}
+    elif loc.px is not None and loc.py is not None:
+        cal = pr.data.get("calibration") or {}
+        if not cal.get("H"):
+            raise HTTPException(400, "court not calibrated")
+        x, y = court.to_court(cal["H"], loc.px, loc.py, cal.get("dist"))
+        entry = {"x": round(x, 2), "y": round(y, 2), "px": loc.px, "py": loc.py}
+    else:
+        raise HTTPException(422, "give px,py or x,y")
+    if not court.on_court(x, y, margin=2.0):
+        raise HTTPException(400, f"that point is off the court ({x:.1f}, {y:.1f} m)")
+    pr.data.setdefault("shots", {})[key] = entry
+    pr.save()
+    return _shot_chart(pr)
+
+
+@app.delete("/api/match/{match_id}/shots/{key}")
+def del_shot_location(match_id: int, key: str):
+    pr = project(match_id)
+    (pr.data.get("shots") or {}).pop(key, None)
+    pr.save()
+    return _shot_chart(pr)
+
+
+@app.put("/api/match/{match_id}/ends")
+def set_ends(match_id: int, e: EndsIn):
+    pr = project(match_id)
+    if e.home_first in ("L", "R"):
+        pr.data["ends"] = {"home_first": e.home_first}
+    else:
+        pr.data.pop("ends", None)
+    pr.save()
+    return _shot_chart(pr)
 
 
 @app.get("/api/match/{match_id}/frame")

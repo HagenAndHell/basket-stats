@@ -16,8 +16,7 @@ const check = (name, cond, detail = "") => { console.log(`${cond ? "PASS" : "FAI
 (async () => {
   const chrome = spawn(CHROME, ["--headless=new", "--no-sandbox", "--disable-gpu", "--autoplay-policy=no-user-gesture-required", `--remote-debugging-port=${PORT}`, "about:blank"], { stdio: "ignore" });
   try {
-    await sleep(1500);
-    const targets = await getJSON(`http://127.0.0.1:${PORT}/json`);
+    let targets; for (let i = 0; i < 40; i++) { try { targets = await getJSON(`http://127.0.0.1:${PORT}/json`); break; } catch { await sleep(500); } }
     const sock = new WebSocket(targets.find(t => t.type === "page").webSocketDebuggerUrl);
     let id = 0; const pending = {}; const errors = [];
     const send = (method, params = {}) => new Promise(r => { const i = ++id; pending[i] = r; sock.send(JSON.stringify({ id: i, method, params })); });
@@ -145,6 +144,58 @@ const check = (name, cond, detail = "") => { console.log(`${cond ? "PASS" : "FAI
     // calibration persists across reload of the match
     await ev("loadMatch(8439241)"); await sleep(1500);
     check("calibration persisted", await ev("S.data.calibration.points.length") === 5);
+
+    // ---- Shots tab: chart, locating from the frame, drag/remove on the chart, FT auto placement, ends
+    await ev("document.querySelector('[data-tab=shots]').click()");
+    check("shots tab lists all shot attempts", await waitFor("document.querySelectorAll('#sc-body tr').length > 100"), await ev("document.querySelectorAll('#sc-body tr').length"));
+    check("shot chart canvas visible", await ev("document.getElementById('shotchart').offsetHeight > 0"));
+    check("summary: nothing located, ends unknown", await ev("document.getElementById('sc-summary').textContent").then(t => /not located/.test(t) && /ends unknown/.test(t)));
+    check("locate refused before sync", await ev("(()=>{toast._last=null; const b=document.querySelector('#sc-body button.locate'); b.click(); return document.getElementById('toast').textContent})()").then(t => /not synced/.test(t)));
+    // sync Q1 so shots get video times (fake video 0..; clip is short so P.seek is stubbed)
+    await ev("P.time = () => 30; document.getElementById('sync-clock').value='0:00'; document.getElementById('sync-period').value='1'; document.getElementById('btn-anchor').click()"); await sleep(800);
+    await waitFor("SC.data && SC.data.attempts.some(a => a.video != null)");
+    await ev("P.seek = t => { window._seek = t }; P.pause = () => {}");
+    const firstKey = await ev("SC.data.attempts.find(a => a.period === 1 && a.shot !== 'ft').key");
+    await ev(`locateShot('${firstKey}')`);
+    check("locate opens the frame viewer in locate mode", await waitFor("!document.getElementById('calib-full').classList.contains('hidden') && CF.mode === 'locate' && CF.img", 15000));
+    check("locate title names the shot", await ev("document.getElementById('cf-title').textContent").then(t => /Locate shot: 2-pt made/.test(t) && /Q1 0:54/.test(t)));
+    check("video seeks 1.5 s before the feed clock", Math.abs(await ev("window._seek") - (30 + 54 - 1.5)) < 0.01, await ev("window._seek"));
+    check("calibration controls hidden in locate mode", await ev("document.getElementById('cf-lm-wrap').classList.contains('hidden') && document.getElementById('cf-save').classList.contains('hidden') && !document.getElementById('cf-locate-ctl').classList.contains('hidden')"));
+    // click the shooter's feet: a pixel ~ the L basket area of the test calibration (corner_L_bottom 96,918 .. centre 1056,670)
+    await ev("(()=>{const cv=document.getElementById('cf-canvas'); const r=cv.getBoundingClientRect(); cfFit(); const ix=420, iy=760; const x=r.left+CF.ox+ix*CF.scale, y=r.top+CF.oy+iy*CF.scale; cv.dispatchEvent(new MouseEvent('mousedown',{clientX:x, clientY:y, bubbles:true})); cv.dispatchEvent(new MouseEvent('mouseup',{clientX:x, clientY:y, bubbles:true}));})()");
+    check("shot located from the frame click", await waitFor(`SC.data.attempts.find(a => a.key === '${firstKey}').located`, 5000));
+    const loc = await ev(`(()=>{const a=SC.data.attempts.find(a => a.key === '${firstKey}'); return {x:a.x,y:a.y,hx:a.hx,zone:a.zone,end:a.end,px:a.px}})()`);
+    check("located shot has court coords, zone and pixel", Math.abs(loc.px - 420) < 1.5 && loc.zone && loc.hx != null && Math.abs(loc.x) < 40, JSON.stringify(loc));
+    check("ends inferred from the located field goal", await ev("SC.data.ends && SC.data.ends.inferred && /L|R/.test(SC.data.ends.home_first)"), await ev("JSON.stringify(SC.data.ends)"));
+    check("free throws auto-placed once ends are known", await ev("SC.data.attempts.filter(a => a.shot === 'ft').every(a => a.auto && a.zone === 'ft' && a.hx != null)"));
+    check("auto-advanced to the next unlocated shot", await waitFor(`CF.mode === 'locate' && CF.shot && CF.shot.key !== '${firstKey}' && !CF.shot.located`, 5000), await ev("CF.shot && CF.shot.key"));
+    await ev("document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape', bubbles:true}))");
+    check("Esc closes locate mode", await ev("document.getElementById('calib-full').classList.contains('hidden')"));
+    check("summary counts the located shot", await ev("document.getElementById('sc-summary').textContent").then(t => /FG<\/b>|FG/.test(t) && !/ends unknown/.test(t)), await ev("document.getElementById('sc-summary').textContent"));
+    check("marker drawn on the chart", await ev("(()=>{const c=document.getElementById('shotchart'); const d=c.getContext('2d').getImageData(0,0,c.width,c.height).data; let n=0; for(let i=0;i<d.length;i+=4) if((d[i+1]>150 && d[i]<100) || (d[i]>200 && d[i+1]<100)) n++; return n;})()") > 20);
+    // drag the marker on the chart -> new location saved in metres
+    const before2 = await ev(`(()=>{const a=SC.data.attempts.find(a => a.key === '${firstKey}'); return [a.x, a.y]})()`);
+    await ev(`(()=>{const a=SC.data.attempts.find(a => a.key === '${firstKey}'); const cv=document.getElementById('shotchart'); const r=cv.getBoundingClientRect(); const k=r.width/cv.width; const {X,Y}=scXY();
+      const x=r.left+X(a.hy)*k, y=r.top+Y(a.hx)*k; cv.dispatchEvent(new MouseEvent('mousedown',{button:0, clientX:x, clientY:y, bubbles:true})); cv.dispatchEvent(new MouseEvent('mousemove',{clientX:x+40*k, clientY:y+40*k, bubbles:true})); cv.dispatchEvent(new MouseEvent('mouseup',{clientX:x+40*k, clientY:y+40*k, bubbles:true}));})()`);
+    await sleep(800);
+    const after2 = await ev(`(()=>{const a=SC.data.attempts.find(a => a.key === '${firstKey}'); return [a.x, a.y, a.px]})()`);
+    check("drag on chart moves the shot (and drops the pixel)", (Math.abs(after2[0] - before2[0]) > 0.5 || Math.abs(after2[1] - before2[1]) > 0.5) && after2[2] == null, JSON.stringify([before2, after2]));
+    // explicit ends override and swap the half-court view
+    const hxBefore = await ev(`SC.data.attempts.find(a => a.key === '${firstKey}').hx`);
+    await ev(`document.getElementById('sc-ends').value = SC.data.ends.home_first === 'L' ? 'R' : 'L'; document.getElementById('sc-ends').onchange()`); await sleep(800);
+    check("manual ends override", await ev("SC.data.ends && !SC.data.ends.inferred"), await ev("JSON.stringify(SC.data.ends)"));
+    check("shot re-mapped to the other basket", Math.abs(await ev(`SC.data.attempts.find(a => a.key === '${firstKey}').hx`) - hxBefore) > 1, await ev(`SC.data.attempts.find(a => a.key === '${firstKey}').hx`));
+    await ev("document.getElementById('sc-ends').value = ''; document.getElementById('sc-ends').onchange()"); await sleep(600);
+    // right-click removes the location
+    await ev(`(()=>{const a=SC.data.attempts.find(a => a.key === '${firstKey}'); const cv=document.getElementById('shotchart'); const r=cv.getBoundingClientRect(); const k=r.width/cv.width; const {X,Y}=scXY(); cv.dispatchEvent(new MouseEvent('contextmenu',{clientX:r.left+X(a.hy)*k, clientY:r.top+Y(a.hx)*k, bubbles:true, cancelable:true}));})()`);
+    check("right-click removes the location", await waitFor(`!SC.data.attempts.find(a => a.key === '${firstKey}').located`, 5000));
+    // tagged miss appears as an attempt
+    await ev("document.getElementById('tag-team').value='away'; fillTagPlayers(); P.time = () => 100"); await ev("addTag('fga3')"); await sleep(800);
+    check("tagged 3-pt miss listed as a shot attempt", await waitFor("SC.data.attempts.some(a => a.src === 'tag' && a.shot === '3' && !a.made)", 5000));
+    await ev("document.querySelectorAll('#tag-body button[data-del]').forEach(b => b.click())"); await sleep(600);
+    await ev("document.querySelectorAll('#sync-list button').forEach(b=>b.click())"); await sleep(600);
+    // persisted server-side
+    check("shot locations persisted in project", await getJSON(`${BASE}/api/match/8439241`).then(d => d.shots !== undefined));
 
     check("no uncaught JS errors", errors.length === 0, errors.join(" | "));
     console.log(failures ? `\n${failures} FAILED` : "\nALL PASSED");

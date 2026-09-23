@@ -101,6 +101,7 @@
         <button data-tab="box">Box score</button>
         <button data-tab="tags">Tags</button>
         <button data-tab="court">Court</button>
+        <button data-tab="shots">Shots</button>
       </div>
       <div class="row" id="ev-filter" style="margin-bottom:6px">
         <select id="f-team"><option value="">Both teams</option><option value="home">Home</option><option value="away">Away</option></select>
@@ -127,6 +128,23 @@
         </details>
       </div>
       <div class="scroll hidden" id="tab-tags"><table><thead><tr><th>Q</th><th>Clock</th><th>Team</th><th>Stat</th><th>Player</th><th>Video</th><th></th></tr></thead><tbody id="tag-body"></tbody></table></div>
+      <div class="scroll hidden" id="tab-shots">
+        <div class="row" style="margin-bottom:6px">
+          <select id="sc-team"><option value="">Both teams</option><option value="home">Home</option><option value="away">Away</option></select>
+          <select id="sc-player"><option value="">All players</option></select>
+          <select id="sc-period"><option value="">All periods</option></select>
+          <label title="Which basket the home team attacks in the 1st half (L = left in the 2D court / the x=0 baseline). Inferred from located shots if not set.">Home attacks 1st half <select id="sc-ends"><option value="">auto</option><option value="L">L basket</option><option value="R">R basket</option></select></label>
+        </div>
+        <canvas id="shotchart" width="460" height="440" style="width:100%; max-width:520px; background:#1b2230; border-radius:6px; cursor:crosshair"></canvas>
+        <div id="sc-summary" style="font-size:12px; margin:6px 0"></div>
+        <div class="row" style="margin:6px 0">
+          <b>Locate shots</b>
+          <span class="muted" style="font-size:12px">Click a shot below (video jumps to it), press <span class="kbd">L</span> or the <b>locate</b> button: the frame opens, click where the shooter's feet are. Free throws are placed automatically. On the chart: drag a marker to correct it, right-click to remove.</span>
+          <button class="small primary" id="sc-next" title="Jump to the next shot without a location">Next unlocated</button>
+          <label><input type="checkbox" id="sc-only-unlocated"> only unlocated</label>
+        </div>
+        <table><thead><tr><th>Q</th><th>Clock</th><th>Team</th><th>Shot</th><th>Player</th><th>Zone</th><th>Dist</th><th>Video</th><th></th></tr></thead><tbody id="sc-body"></tbody></table>
+      </div>
     </div>
   </div>
 </main>
@@ -134,11 +152,12 @@
 
 <div id="calib-full" class="hidden">
   <div class="cf-bar">
-    <b>Court calibration</b>
-    <label>Landmark <select id="lm-select"></select></label>
-    <span class="muted">Click to place · wheel = zoom · drag = pan · <span class="kbd">R</span> reset view · <span class="kbd">Esc</span> close · after Save, ±px shows how far each point is from the fitted model — red ones are probably mis-clicked or mislabelled</span>
+    <b id="cf-title">Court calibration</b>
+    <label id="cf-lm-wrap">Landmark <select id="lm-select"></select></label>
+    <span class="muted" id="cf-help">Click to place · wheel = zoom · drag = pan · <span class="kbd">R</span> reset view · <span class="kbd">Esc</span> close · after Save, ±px shows how far each point is from the fitted model — red ones are probably mis-clicked or mislabelled</span>
     <span id="cf-info" class="muted"></span>
     <span style="flex:1"></span>
+    <span id="cf-locate-ctl" class="hidden"><button class="small" data-fr="-0.5">−0.5s</button><button class="small" data-fr="-0.1">−0.1s</button><button class="small" data-fr="0.1">+0.1s</button><button class="small" data-fr="0.5">+0.5s</button> <button class="small" id="cf-skip">Skip</button></span>
     <button class="small" id="cf-reset">Reset view</button>
     <button class="small primary" id="cf-save">Save calibration</button>
     <button class="small" id="cf-close">Close</button>
@@ -198,12 +217,14 @@ async function loadMatch(id) {
   await refreshEvents(); renderSync(); renderBox(); renderTags();
   if (!COURT) await loadCourtMeta();
   renderCalibStatus(); TRK = { frames: [], t0: null, t1: null }; trackStatus().catch(() => {}); drawCourt(P.time());
+  fillShotFilters(); SC = { data: null, sel: null, drag: null }; refreshShots().catch(e => toast(e.message));
 }
 function players(team) { return S.data.feed.players.filter(p => !team || p.team === team).sort((a,b) => (+a.no||999) - (+b.no||999)); }
 function fillTagPlayers() { $("tag-player").innerHTML = players($("tag-team").value).map(p => `<option value="${p.personId}">#${esc(p.no)} ${esc(p.name)}</option>`).join(""); }
 function fillFilterPlayers() { $("f-player").innerHTML = '<option value="">All players</option>' + ["home","away"].flatMap(t => players(t).map(p => `<option value="${p.personId}">${t === "home" ? "H" : "A"} #${esc(p.no)} ${esc(p.name)}</option>`)).join(""); }
 async function refreshEvents() {
   S.events = await api(`match/${S.matchId}/events`);
+  if (SC.data) refreshShots().catch(() => {});
   const sync = S.data.sync || {};
   for (const e of S.events) e.anchored = (sync[e.period] || []).some(a => Math.abs(a.clock - e.clock) < 0.5);
   renderEvents();
@@ -265,13 +286,13 @@ async function addTag(stat) {
   const video = P.time();
   const gc = await api(`match/${S.matchId}/clock?video=${video}`);
   const tag = await post(`match/${S.matchId}/tags`, { video, period: gc.period, clock: gc.clock, team: $("tag-team").value, personId: $("tag-player").value, stat });
-  S.data.tags.push(tag); renderTags(); renderEvents(); renderBox();
+  S.data.tags.push(tag); renderTags(); renderEvents(); renderBox(); if (stat === "fga2" || stat === "fga3") refreshShots().catch(() => {});
   toast(`${(STATS.find(s => s[0] === stat) || [stat, stat])[1]} → #${playerNo(tag.personId)} ${playerName(tag.personId)} @ ${fmt(video)}`);
 }
 function renderTags() {
   $("tag-body").innerHTML = (S.data.tags || []).slice().sort((a,b) => a.video - b.video).map(t => `<tr class="ev" data-video="${t.video}"><td>${t.period ? "Q" + t.period : ""}</td><td>${t.clock != null ? fmtc(t.clock) : ""}</td><td class="${t.team}">${t.team === "home" ? "H" : "A"}</td><td>${esc((STATS.find(s => s[0] === t.stat) || [t.stat, t.stat])[1])}</td><td>#${esc(playerNo(t.personId))} ${esc(playerName(t.personId))}</td><td class="muted">${fmt(t.video)}</td><td><button class="small" data-del="${t.id}">×</button></td></tr>`).join("");
   $("tag-body").querySelectorAll("tr").forEach(tr => tr.onclick = e => { if (e.target.dataset.del) return; P.seek(+tr.dataset.video - 5); });
-  $("tag-body").querySelectorAll("button[data-del]").forEach(b => b.onclick = async () => { S.data.tags = await api(`match/${S.matchId}/tags/${b.dataset.del}`, { method:"DELETE" }); renderTags(); renderEvents(); renderBox(); });
+  $("tag-body").querySelectorAll("button[data-del]").forEach(b => b.onclick = async () => { S.data.tags = await api(`match/${S.matchId}/tags/${b.dataset.del}`, { method:"DELETE" }); renderTags(); renderEvents(); renderBox(); refreshShots().catch(() => {}); });
 }
 
 // ---------- box score (feed + tags)
@@ -310,16 +331,28 @@ let COURT = null, LM = null, calibPts = [], calibSrc = null;
 async function loadCourtMeta() { COURT = await api("court/landmarks"); LM = COURT.landmarks;
   $("lm-select").innerHTML = Object.keys(LM).map(k => `<option value="${k}">${k.replace(/_/g, " ")}</option>`).join(""); }
 // fullscreen calibrator: full-res frame on a canvas with zoom/pan
-const CF = { img: null, scale: 1, ox: 0, oy: 0, drag: null, mouse: null, fit: 1, outline: null };
+const CF = { img: null, scale: 1, ox: 0, oy: 0, drag: null, mouse: null, fit: 1, outline: null, mode: "calib", t: 0, shot: null };
 async function loadOutline() { try { CF.outline = S.data?.calibration?.H ? (await api(`match/${S.matchId}/calibration/outline`)).lines : null; } catch { CF.outline = null; } drawCalib(); }
-$("btn-frame").onclick = async () => {
-  const t = P.time();
-  const r = await fetch(`/api/match/${S.matchId}/frame?t=${t}&width=0`); if (!r.ok) return toast(await r.text());
+async function loadFrame(t) {
+  const r = await fetch(`/api/match/${S.matchId}/frame?t=${t}&width=0`); if (!r.ok) throw new Error(await r.text());
   calibSrc = { w: +r.headers.get("X-Source-Width"), h: +r.headers.get("X-Source-Height") };
   const img = new Image(); img.src = URL.createObjectURL(await r.blob());
-  await img.decode(); CF.img = img;
-  $("calib-full").classList.remove("hidden"); cfFit(); drawCalib(); loadOutline();
-};
+  await img.decode(); CF.img = img; CF.t = t;
+}
+async function openFrame(t, mode, shot) {
+  try { await loadFrame(t); } catch (e) { return toast(e.message); }
+  CF.mode = mode; CF.shot = shot || null;
+  const loc = mode === "locate";
+  $("cf-title").textContent = loc ? `Locate shot: ${shot.label} · ${shot.playerNo != null && shot.playerNo !== "" ? "#" + shot.playerNo + " " : ""}${shot.playerName || playerName(shot.personId)} · Q${shot.period} ${shot.clockStr || fmtc(shot.clock)}` : "Court calibration";
+  $("cf-lm-wrap").classList.toggle("hidden", loc); $("cf-save").classList.toggle("hidden", loc); $("cf-pts").classList.toggle("hidden", loc); $("cf-locate-ctl").classList.toggle("hidden", !loc);
+  $("cf-help").innerHTML = loc ? 'Click where the shooter\'s <b>feet</b> are at release · wheel = zoom · drag = pan · ±s buttons step the frame · <span class="kbd">Esc</span> close'
+    : 'Click to place · wheel = zoom · drag = pan · <span class="kbd">R</span> reset view · <span class="kbd">Esc</span> close · after Save, ±px shows how far each point is from the fitted model — red ones are probably mis-clicked or mislabelled';
+  const wasHidden = $("calib-full").classList.contains("hidden");
+  $("calib-full").classList.remove("hidden"); if (wasHidden) cfFit(); drawCalib(); loadOutline();
+}
+$("btn-frame").onclick = () => openFrame(P.time(), "calib");
+$("cf-locate-ctl").querySelectorAll("button[data-fr]").forEach(b => b.onclick = async () => { const t = Math.max(0, CF.t + +b.dataset.fr); P.seek(t); try { await loadFrame(t); } catch (e) { return toast(e.message); } drawCalib(); });
+$("cf-skip").onclick = () => { cfClose(); nextUnlocated(CF.shot?.key); };
 function cfFit() { const cv = $("cf-canvas"); cv.width = cv.clientWidth; cv.height = cv.clientHeight; if (!CF.img) return;
   CF.fit = Math.min(cv.width / CF.img.width, cv.height / CF.img.height); CF.scale = CF.fit; CF.ox = (cv.width - CF.img.width * CF.scale) / 2; CF.oy = (cv.height - CF.img.height * CF.scale) / 2; }
 const cfToImg = (x, y) => [(x - CF.ox) / CF.scale, (y - CF.oy) / CF.scale];
@@ -337,6 +370,7 @@ window.addEventListener("resize", () => { if (!$("calib-full").classList.contain
   cv.addEventListener("mouseup", e => { const d = CF.drag; CF.drag = null; if (!d || d.moved || !calibSrc) return;
     const r = cv.getBoundingClientRect(); const [ix, iy] = cfToImg(e.clientX - r.left, e.clientY - r.top);
     if (ix < 0 || iy < 0 || ix > calibSrc.w || iy > calibSrc.h) return;
+    if (CF.mode === "locate") { locateShotAt(CF.shot, Math.round(ix * 10) / 10, Math.round(iy * 10) / 10); return; }
     const name = $("lm-select").value; calibPts = calibPts.filter(p => p.name !== name); calibPts.push({ name, px: Math.round(ix * 10) / 10, py: Math.round(iy * 10) / 10 });
     const o = $("lm-select"); if (o.selectedIndex < o.options.length - 1) o.selectedIndex++; drawCalib(); });
   cv.addEventListener("mouseleave", () => { CF.drag = null; CF.mouse = null; drawCalib(); });
@@ -350,6 +384,12 @@ function drawCalib() {
   const cv = $("cf-canvas"), g = cv.getContext("2d"); g.setTransform(1, 0, 0, 1, 0, 0); g.clearRect(0, 0, cv.width, cv.height);
   g.imageSmoothingEnabled = CF.scale < 2; g.drawImage(CF.img, CF.ox, CF.oy, CF.img.width * CF.scale, CF.img.height * CF.scale);
   if (CF.outline) { g.strokeStyle = "rgba(34,197,94,.75)"; g.lineWidth = 1.5; CF.outline.forEach(seg => { g.beginPath(); seg.forEach(([px, py], i) => { const X = CF.ox + px * CF.scale, Y = CF.oy + py * CF.scale; i ? g.lineTo(X, Y) : g.moveTo(X, Y); }); g.stroke(); }); }
+  if (CF.mode === "locate") {
+    if (CF.shot?.px != null) { const X = CF.ox + CF.shot.px * CF.scale, Y = CF.oy + CF.shot.py * CF.scale; g.strokeStyle = CF.shot.made ? "#22c55e" : "#ef4444"; g.lineWidth = 2; g.beginPath(); g.arc(X, Y, 8, 0, 7); g.stroke(); g.beginPath(); g.moveTo(X - 12, Y); g.lineTo(X + 12, Y); g.moveTo(X, Y - 12); g.lineTo(X, Y + 12); g.stroke(); }
+    if (CF.mouse) { const [mx, my] = CF.mouse; g.strokeStyle = "rgba(255,255,255,.5)"; g.lineWidth = 1; g.beginPath(); g.moveTo(mx, 0); g.lineTo(mx, cv.height); g.moveTo(0, my); g.lineTo(cv.width, my); g.stroke();
+      const [ix, iy] = cfToImg(mx, my); $("cf-info").textContent = `frame ${fmt(CF.t)} · (${ix.toFixed(0)}, ${iy.toFixed(0)}) · zoom ${(CF.scale / CF.fit).toFixed(1)}×`; }
+    return;
+  }
   for (const p of calibPts) { const X = CF.ox + p.px * CF.scale, Y = CF.oy + p.py * CF.scale; g.strokeStyle = "#22c55e"; g.lineWidth = 1.5; g.beginPath(); g.moveTo(X - 10, Y); g.lineTo(X + 10, Y); g.moveTo(X, Y - 10); g.lineTo(X, Y + 10); g.stroke(); g.beginPath(); g.arc(X, Y, 6, 0, 7); g.stroke();
     g.font = "12px sans-serif"; g.fillStyle = "#000"; g.fillText(p.name, X + 10, Y - 5); g.fillStyle = "#fff"; g.fillText(p.name, X + 9, Y - 6); }
   if (CF.mouse) { const [mx, my] = CF.mouse; g.strokeStyle = "rgba(255,255,255,.5)"; g.lineWidth = 1; g.beginPath(); g.moveTo(mx, 0); g.lineTo(mx, cv.height); g.moveTo(0, my); g.lineTo(cv.width, my); g.stroke();
@@ -413,6 +453,116 @@ function drawCourt(t) {
 function toCourtH(H, px, py) { const v = mul3(H, [px, py, 1]); return [v[0] / v[2], v[1] / v[2]]; }
 function colorFor(id, a) { const h = (id * 137.508) % 360; return `hsla(${h},70%,55%,${a})`; }
 
+// ---------- shot chart
+let SC = { data: null, sel: null, drag: null };
+const shotOf = key => SC.data?.attempts.find(a => a.key === key);
+async function refreshShots(d) { SC.data = d || await api(`match/${S.matchId}/shots`); renderShots(); }
+function fillShotFilters() {
+  $("sc-player").innerHTML = '<option value="">All players</option>' + ["home","away"].flatMap(t => players(t).map(p => `<option value="${p.personId}">${t === "home" ? "H" : "A"} #${esc(p.no)} ${esc(p.name)}</option>`)).join("");
+  $("sc-period").innerHTML = '<option value="">All periods</option>' + S.data.feed.periods.map(p => `<option value="${p.n}">${p.label}</option>`).join("");
+  const m = S.data.feed.match; $("sc-team").innerHTML = `<option value="">Both teams</option><option value="home">${esc(m.home.name)}</option><option value="away">${esc(m.away.name)}</option>`;
+}
+function shotFilter() { const ft = $("sc-team").value, fp = $("sc-player").value, fq = $("sc-period").value; return a => (!ft || a.team === ft) && (!fp || a.personId === fp) && (!fq || String(a.period) === fq); }
+function renderShots() {
+  if (!SC.data || !COURT) return;
+  const d = SC.data, f = shotFilter(); const att = d.attempts.filter(f);
+  $("sc-ends").value = S.data.ends?.home_first || "";
+  const endsNote = d.ends ? (d.ends.inferred ? ` (inferred: home attacks ${d.ends.home_first} basket in 1st half)` : "") : " — ends unknown: locate one field goal or pick them above";
+  // summary
+  const s = summarize(att); const z = s.zones; const pct = o => o.att ? `${o.made}/${o.att} (${o.pct}%)` : "—";
+  $("sc-summary").innerHTML = `<b>FG</b> ${pct(s.fg)} · <b>Paint</b> ${pct(z.paint)} · <b>Mid</b> ${pct(z.mid)} · <b>3pt</b> ${pct(z["3pt"])} · <b>FT</b> ${pct(z.ft)} · <span class="muted">${s.unlocated} of ${att.length} shots not located${endsNote}${s.mismatch ? ` · <span style="color:var(--warn)">${s.mismatch} located where the feed's 2/3 value disagrees (⚠)</span>` : ""}</span>`;
+  // table
+  const only = $("sc-only-unlocated").checked;
+  $("sc-body").innerHTML = att.filter(a => !only || !a.located && !a.auto).map(a => `<tr class="ev ${a.key === SC.sel ? "sel" : ""} ${a.video == null ? "nosync" : ""}" data-key="${a.key}">
+    <td>${a.period ? "Q" + a.period : ""}</td><td>${esc(a.clockStr || fmtc(a.clock))}</td><td class="${a.team}">${a.team === "home" ? "H" : "A"}</td>
+    <td>${a.made ? "●" : "○"} ${a.shot === "ft" ? "FT" : a.shot + "P"}${a.src === "tag" ? ' <span class="pill">tag</span>' : ""}${a.mismatch ? ' <span title="the location says ' + (a.zone === "3pt" ? "3" : "2") + ' points but the feed says ' + a.shot + '" style="color:var(--warn)">⚠</span>' : ""}</td>
+    <td>${a.playerNo != null && a.playerNo !== "" ? "#" + esc(a.playerNo) + " " : ""}${esc(a.playerName || playerName(a.personId))}</td>
+    <td>${a.zone ? esc(a.zone) + (a.auto ? ' <span class="muted">auto</span>' : "") : '<span class="muted">—</span>'}</td><td class="n">${a.dist != null && a.shot !== "ft" ? a.dist.toFixed(1) + " m" : ""}</td>
+    <td class="muted">${a.video != null ? fmt(a.video) : "not synced"}</td>
+    <td>${a.shot !== "ft" || a.located ? `<button class="small locate" data-key="${a.key}" title="Open the frame and click the shooter's feet (key L for the selected shot)">${a.located ? "re-locate" : "locate"}</button>` : ""}${a.located ? ` <button class="small" data-unloc="${a.key}" title="Remove the location">×</button>` : ""}</td></tr>`).join("");
+  $("sc-body").querySelectorAll("tr").forEach(tr => tr.onclick = e => { if (e.target.tagName === "BUTTON") return; SC.sel = tr.dataset.key; renderShots(); const a = shotOf(SC.sel); if (a?.video != null) P.seek(a.video - 5); });
+  $("sc-body").querySelectorAll("button.locate").forEach(b => b.onclick = () => locateShot(b.dataset.key));
+  $("sc-body").querySelectorAll("button[data-unloc]").forEach(b => b.onclick = async () => { try { await refreshShots(await api(`match/${S.matchId}/shots/${b.dataset.unloc}`, { method:"DELETE" })); } catch (e) { toast(e.message); } });
+  drawShotChart(att);
+}
+function summarize(att) {
+  const zones = { paint:{made:0,att:0}, mid:{made:0,att:0}, "3pt":{made:0,att:0}, ft:{made:0,att:0} }; let unl = 0, mm = 0;
+  for (const a of att) { if (!a.zone) { unl++; continue; } zones[a.zone].att++; if (a.made) zones[a.zone].made++; if (a.mismatch) mm++; }
+  for (const k in zones) zones[k].pct = zones[k].att ? Math.round(100 * zones[k].made / zones[k].att) : null;
+  const fg = { made: zones.paint.made + zones.mid.made + zones["3pt"].made, att: zones.paint.att + zones.mid.att + zones["3pt"].att }; fg.pct = fg.att ? Math.round(100 * fg.made / fg.att) : null;
+  return { zones, fg, unlocated: unl, mismatch: mm };
+}
+// half court drawn with the basket at the TOP (baseline along the top edge), x down the court, y across
+const SCV = { pad: 14, len: 15.5 };  // metres of court length shown (baseline .. a bit past the arc)
+function scXY() { const cv = $("shotchart"); const sc = (cv.width - 2 * SCV.pad) / COURT.width; return { sc, X: hy => SCV.pad + (COURT.width - hy) * sc, Y: hx => SCV.pad + hx * sc, cv }; }
+function scToCourt(cx, cy) { const { sc } = scXY(); return [ (cy - SCV.pad) / sc, COURT.width - (cx - SCV.pad) / sc ]; }  // canvas -> (hx, hy)
+function drawShotChart(att) {
+  const { sc, X, Y, cv } = scXY(); const g = cv.getContext("2d"); cv.height = Math.round(SCV.pad * 2 + SCV.len * sc);
+  const W = COURT.width, ft = COURT.ft_line, lw = COURT.lane_w, r = COURT.arc_r, bx = COURT.basket_x, c3 = COURT.corner3_y;
+  g.clearRect(0, 0, cv.width, cv.height); g.fillStyle = "#1b2230"; g.fillRect(0, 0, cv.width, cv.height);
+  g.strokeStyle = "rgba(255,255,255,.55)"; g.lineWidth = 1;
+  const line = pts => { g.beginPath(); pts.forEach(([hx, hy], i) => i ? g.lineTo(X(hy), Y(hx)) : g.moveTo(X(hy), Y(hx))); g.stroke(); };
+  line([[0, 0], [0, W]]); line([[0, 0], [SCV.len, 0]]); line([[0, W], [SCV.len, W]]);                    // baseline + sidelines
+  line([[0, W / 2 - lw / 2], [ft, W / 2 - lw / 2], [ft, W / 2 + lw / 2], [0, W / 2 + lw / 2]]);           // key
+  g.beginPath(); g.arc(X(W / 2), Y(ft), 1.8 * sc, 0, 7); g.stroke();                                       // FT circle
+  const cx3 = SC.data?.court?.corner3_x ?? (bx + Math.sqrt(r * r - (W / 2 - c3) ** 2));
+  line([[0, c3], [cx3, c3]]); line([[0, W - c3], [cx3, W - c3]]);
+  const arc = []; for (let a = -Math.PI / 2; a <= Math.PI / 2 + 1e-6; a += Math.PI / 90) { const hx = bx + r * Math.cos(a), hy = W / 2 + r * Math.sin(a); if (hy >= c3 && hy <= W - c3) arc.push([hx, hy]); } line(arc);
+  g.beginPath(); g.arc(X(W / 2), Y(bx), 0.225 * sc, 0, 7); g.strokeStyle = "#f97316"; g.stroke();          // ring
+  g.strokeStyle = "rgba(255,255,255,.55)"; line([[bx - 0.375, W / 2 - 0.9], [bx - 0.375, W / 2 + 0.9]]);  // backboard
+  // shots
+  for (const a of att) {
+    if (a.hx == null || a.shot === "ft") continue;
+    const x = X(a.hy), y = Y(a.hx), sel = a.key === SC.sel;
+    g.lineWidth = sel ? 3 : 1.5; g.strokeStyle = a.mismatch ? "#f59e0b" : a.made ? "#22c55e" : "#ef4444";
+    g.beginPath(); if (a.made) { g.arc(x, y, sel ? 7 : 5, 0, 7); g.fillStyle = a.mismatch ? "rgba(245,158,11,.8)" : "rgba(34,197,94,.8)"; g.fill(); } else { g.moveTo(x - 5, y - 5); g.lineTo(x + 5, y + 5); g.moveTo(x + 5, y - 5); g.lineTo(x - 5, y + 5); } g.stroke();
+    if (sel) { g.beginPath(); g.arc(x, y, 10, 0, 7); g.strokeStyle = "#fff"; g.lineWidth = 1; g.stroke(); }
+  }
+  g.fillStyle = "#8b93a7"; g.font = "11px sans-serif"; g.fillText("● made   ✕ missed   ⚠ 2/3 mismatch   (drag to correct, right-click to remove)", SCV.pad, cv.height - 4);
+}
+{
+  const cv = $("shotchart");
+  const hit = e => { const r = cv.getBoundingClientRect(); const k = cv.width / r.width; const mx = (e.clientX - r.left) * k, my = (e.clientY - r.top) * k; const { X, Y } = scXY();
+    let best = null; for (const a of (SC.data?.attempts || []).filter(shotFilter())) { if (a.hx == null || a.shot === "ft") continue; const d = Math.hypot(X(a.hy) - mx, Y(a.hx) - my); if (d < 9 && (!best || d < best.d)) best = { a, d }; } return { a: best?.a, mx, my }; };
+  cv.addEventListener("mousedown", e => { if (e.button !== 0) return; const { a } = hit(e); if (a) SC.drag = { key: a.key, moved: false }; });
+  cv.addEventListener("mousemove", e => { if (!SC.drag) { cv.style.cursor = hit(e).a ? "grab" : "crosshair"; return; } const { mx, my } = hit(e); const a = shotOf(SC.drag.key); const [hx, hy] = scToCourt(mx, my); a.hx = hx; a.hy = hy; SC.drag.moved = true; drawShotChart(SC.data.attempts.filter(shotFilter())); });
+  const finish = async e => { const d = SC.drag; SC.drag = null; if (!d) return; const a = shotOf(d.key);
+    if (!d.moved) { SC.sel = a.key; renderShots(); if (a.video != null) P.seek(a.video - 5); return; }
+    // half-court -> full-court for this shot's end
+    const full = a.end === "R" ? [COURT.length - a.hx, COURT.width - a.hy] : [a.hx, a.hy];
+    try { await refreshShots(await api(`match/${S.matchId}/shots/${a.key}`, { method:"PUT", headers:{ "Content-Type":"application/json" }, body: JSON.stringify({ x: full[0], y: full[1] }) })); } catch (err) { toast(err.message); refreshShots(); } };
+  cv.addEventListener("mouseup", finish); cv.addEventListener("mouseleave", () => { if (SC.drag?.moved) finish(); else SC.drag = null; });
+  cv.addEventListener("contextmenu", async e => { e.preventDefault(); const { a } = hit(e); if (!a) return; try { await refreshShots(await api(`match/${S.matchId}/shots/${a.key}`, { method:"DELETE" })); toast("location removed"); } catch (err) { toast(err.message); } });
+}
+function locateShot(key) {
+  const a = shotOf(key); if (!a) return;
+  if (!S.data?.calibration?.H) return toast("calibrate the court first (Court tab)");
+  if (a.video == null) return toast("this period is not synced yet — the video time of the shot is unknown");
+  SC.sel = key; renderShots();
+  // the feed clock is the moment the scorer pressed the button, usually ~1-2 s after release
+  const t = a.px != null && a.frame_t != null ? a.frame_t : Math.max(0, a.video - 1.5);
+  P.pause(); P.seek(t); openFrame(t, "locate", a);
+}
+async function locateShotAt(shot, px, py) {
+  try {
+    const d = await api(`match/${S.matchId}/shots/${shot.key}`, { method:"PUT", headers:{ "Content-Type":"application/json" }, body: JSON.stringify({ px, py }) });
+    await refreshShots(d); const a = shotOf(shot.key); CF.shot = a; drawCalib();
+    toast(`${a.zone} · ${a.dist} m from the basket${a.mismatch ? " — ⚠ disagrees with the feed's " + a.shot + " points" : ""}`);
+    setTimeout(() => nextUnlocated(shot.key), 400);
+  } catch (e) { toast(e.message); }
+}
+function nextUnlocated(afterKey) {
+  const list = (SC.data?.attempts || []).filter(shotFilter()).filter(a => a.shot !== "ft" && !a.located && a.video != null);
+  if (!list.length) { cfClose(); toast("all shots in this filter are located"); return; }
+  const i = afterKey ? list.findIndex(a => a.key === afterKey) : -1;
+  let next = list.find((a, j) => j > i && (afterKey == null || a.key !== afterKey)) || list[0];
+  if (afterKey) { const cur = shotOf(afterKey); if (cur) next = list.find(a => (a.period > cur.period) || (a.period === cur.period && a.clock > cur.clock)) || list[0]; }
+  locateShot(next.key);
+}
+$("sc-next").onclick = () => nextUnlocated(SC.sel);
+["sc-team","sc-player","sc-period","sc-only-unlocated"].forEach(id => $(id).onchange = renderShots);
+$("sc-ends").onchange = async () => { try { await refreshShots(await api(`match/${S.matchId}/ends`, { method:"PUT", headers:{ "Content-Type":"application/json" }, body: JSON.stringify({ home_first: $("sc-ends").value || null }) })); S.data.ends = $("sc-ends").value ? { home_first: $("sc-ends").value } : null; } catch (e) { toast(e.message); } };
+
 // ---------- header actions
 $("btn-load").onclick = () => { const id = +$("match-id").value; if (id) loadMatch(id).catch(e => toast(e.message)); };
 $("match-id").onkeydown = e => { if (e.key === "Enter") $("btn-load").click(); };
@@ -428,7 +578,7 @@ $("btn-clip").onclick = async () => { try { const r = await post(`match/${S.matc
 document.querySelectorAll("[data-seek]").forEach(b => b.onclick = () => P.seek(P.time() + +b.dataset.seek));
 $("btn-play").onclick = () => P.toggle();
 $("rate").onchange = () => P.rate(+$("rate").value);
-document.querySelectorAll(".tabs button").forEach(b => b.onclick = () => { document.querySelectorAll(".tabs button").forEach(x => x.classList.toggle("active", x === b)); ["events","box","tags","court"].forEach(t => $("tab-" + t).classList.toggle("hidden", t !== b.dataset.tab)); $("ev-filter").classList.toggle("hidden", b.dataset.tab !== "events"); });
+document.querySelectorAll(".tabs button").forEach(b => b.onclick = () => { document.querySelectorAll(".tabs button").forEach(x => x.classList.toggle("active", x === b)); ["events","box","tags","court","shots"].forEach(t => $("tab-" + t).classList.toggle("hidden", t !== b.dataset.tab)); $("ev-filter").classList.toggle("hidden", b.dataset.tab !== "events"); if (b.dataset.tab === "shots") renderShots(); });
 
 // keyboard
 document.addEventListener("keydown", e => {
@@ -440,6 +590,7 @@ document.addEventListener("keydown", e => {
   else if (k === "h") { $("tag-team").value = "home"; fillTagPlayers(); toast("team: home"); }
   else if (k === "v") { $("tag-team").value = "away"; fillTagPlayers(); toast("team: away"); }
   else if (k === "m") markSelected();
+  else if (k === "l") { if (SC.sel) locateShot(SC.sel); else nextUnlocated(null); }
   else if (KEYS[k]) addTag(KEYS[k]);
 });
 

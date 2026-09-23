@@ -81,6 +81,39 @@ Court tab (Phase 2: tracking)
   BASKET_STATS_DEVICE=dml (experimental), or accept CPU speed and run overnight.
 
 
+Shots tab (Phase 3: shot chart)
+-------------------------------
+
+  Needs the court calibration (Court tab) and synced periods.
+
+  Every shot attempt is listed: feed shots (made/missed 2P/3P/FT) plus the
+  2/3-pt misses you tagged. Free throws are placed automatically; field goals
+  need one click each:
+
+  1. Click a shot in the list (video jumps 5 s before it), then press L or its
+     "locate" button. The frame at the shot opens fullscreen (1.5 s before the
+     scorer's clock, since the scorer presses the button after the release;
+     use the -0.5s/+0.5s buttons to step to the release). Click where the
+     shooter's FEET are. The point is converted to court metres, the zone
+     (paint / mid / 3pt) and distance are shown, and the next unlocated shot
+     opens automatically. "Next unlocated" / Skip move on without placing.
+  2. Chart: half court, basket at the top. Green dot = made, red cross = missed,
+     orange = the location disagrees with the feed (a "2" beyond the arc or a
+     "3" inside it) - check the click or the scorer. Drag a marker to correct
+     it, right-click to remove it. Filter by team, player, period.
+  3. Zone summary above the list: made/attempts (%) for paint, mid-range,
+     3-pt and FT.
+
+  Ends: the chart needs to know which basket each team attacks. It is inferred
+  from the first located field goal (home attacks L or R basket in the 1st
+  half; teams swap at half time, overtime keeps 2nd-half ends). Override it
+  with the "Home attacks 1st half" dropdown if a heave from the far half
+  confused the guess.
+
+  Locations are stored in the project file under "shots" (keyed by the feed
+  event id, or t<tagId> for tagged misses), in full-court metres.
+
+
 Development
 -----------
 
@@ -95,6 +128,7 @@ ROADMAP
   Phase 2  (wip)    YOLO player/ball detection + tracking, court calibration,
                     2D court view. Next: team colours, track->player identity,
                     minutes on court, heatmaps
-  Phase 3           shot chart: feed shots for time/player, tracked ball for location,
+  Phase 3  (this)   shot chart: feed shots + tagged misses, located by one click on the frame;
+                    next: tracked ball/player position proposed automatically,
                     miss candidates proposed for confirmation
   Phase 4           tactics view: 2D court playback of possessions
