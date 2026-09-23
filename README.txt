@@ -97,6 +97,11 @@ Shots tab (Phase 3: shot chart)
      shooter's FEET are. The point is converted to court metres, the zone
      (paint / mid / 3pt) and distance are shown, and the next unlocated shot
      opens automatically. "Next unlocated" / Skip move on without placing.
+     With tracking data (Court tab, "Run on whole video") the frame also shows
+     every tracked player as a box: click a box to use that player's feet
+     instead of aiming. If the ball was detected, the app finds the moment it
+     left a player's hands, jumps the frame there and marks that player with
+     a yellow star - press Enter to accept, or click someone else.
   2. Chart: half court, basket at the top. Green dot = made, red cross = missed,
      orange = the location disagrees with the feed (a "2" beyond the arc or a
      "3" inside it) - check the click or the scorer. Drag a marker to correct

@@ -319,6 +319,20 @@ def del_shot_location(match_id: int, key: str):
     return _shot_chart(pr)
 
 
+@app.get("/api/match/{match_id}/shots/{key}/propose")
+def propose_shot(match_id: int, key: str, t: float = Query(...)):
+    """Tracking-based guess for a shot at video time t: players (foot points) in the frame, the ball trail,
+    the likely shooter and the release moment. 404 if there is no tracking data."""
+    pr = project(match_id)
+    meta, frames = _tracks(match_id)
+    cal = pr.data.get("calibration") or {}
+    att = shots.attempts_from(pr.data.get("feed"), pr.data.get("tags") or [])
+    a = next((a for a in att if a["key"] == key), None)
+    ends = pr.data.get("ends") or shots.infer_ends(att, pr.data.get("shots") or {})
+    end = shots.end_for(ends, a["team"], a["period"]) if a and a.get("team") else None
+    return shots.propose(frames, t, cal.get("H"), cal.get("dist"), end)
+
+
 @app.put("/api/match/{match_id}/ends")
 def set_ends(match_id: int, e: EndsIn):
     pr = project(match_id)

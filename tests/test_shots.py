@@ -128,3 +128,71 @@ def test_shot_location_from_pixels_uses_calibration(client):
     a = next(a for a in d["attempts"] if a["key"] == key)
     assert (a["x"], a["y"]) == pytest.approx((6.0, 7.5), abs=0.05)
     assert a["px"] == 700
+
+
+def _frames_with_shot():
+    """Synthetic 10 fps tracking: player 1 stands at x=500, holds the ball until t=5.0, ball flies up/right after."""
+    frames = []
+    for i in range(80):
+        t = round(i / 10, 1)
+        p = [[1, 480, 300, 520, 420, 0.9], [2, 800, 310, 840, 430, 0.9]]
+        if t <= 5.0:
+            b = [495, 320, 505, 330, 0.8]                       # in player 1's box
+        elif t <= 6.0:
+            k = (t - 5.0) * 10
+            b = [500 + 40 * k, 300 - 60 * k, 510 + 40 * k, 310 - 60 * k, 0.7]   # airborne, leaving the box
+        else:
+            b = None
+        frames.append({"t": t, "f": i, "p": p, "b": b})
+    return frames
+
+
+def test_holder_and_release_detection():
+    fr = _frames_with_shot()
+    assert shots._holder(fr[40]) == 1          # t=4.0
+    assert shots._holder(fr[70]) is None       # t=7.0 no ball
+    # scorer logged the shot 1.5 s after the release
+    p = shots.propose(fr, 6.5, None, None, None)
+    assert p["guess_id"] == 1 and p["release_t"] == pytest.approx(5.0) and p["frame_t"] == pytest.approx(5.0)
+    assert p["how"].startswith("ball left")
+    g = [x for x in p["players"] if x["guess"]]
+    assert len(g) == 1 and g[0]["foot"] == [500.0, 420.0]
+    assert p["ball"] and p["ball"][0][0] == pytest.approx(3.0)   # trail starts at t-3.5
+
+
+def test_propose_fallbacks():
+    fr = _frames_with_shot()
+    for f in fr:
+        f["b"] = None
+    p = shots.propose(fr, 6.5, None, None, None)
+    assert p["guess_id"] is None and "no guess" in p["how"] and len(p["players"]) == 2
+    assert p["frame_t"] == pytest.approx(5.0)                  # default: 1.5 s before the logged time
+    assert shots.propose(fr, 50.0, None, None, None)["players"] == []
+    # ball only seen airborne, never held -> closest player
+    fr2 = _frames_with_shot()
+    for f in fr2:
+        f["b"] = [830, 200, 840, 210, 0.6] if 4.0 <= f["t"] <= 4.3 else None
+    p = shots.propose(fr2, 5.5, None, None, None)
+    assert p["guess_id"] == 2 and p["how"].startswith("closest")
+
+
+def test_propose_api_uses_calibration_and_end(client, tmp_path, monkeypatch):
+    import gzip, json as _json
+    client.get("/api/match/8439241")
+    tr = tmp_path / "tracks"; tr.mkdir()
+    with gzip.open(tr / "8439241.jsonl.gz", "wt") as fh:
+        fh.write(_json.dumps({"meta": {}}) + "\n")
+        for f in _frames_with_shot():
+            fh.write(_json.dumps(f) + "\n")
+    pts = [{"name": "corner_L_bottom", "px": 100, "py": 900}, {"name": "corner_R_bottom", "px": 2900, "py": 900},
+           {"name": "corner_R_top", "px": 2900, "py": -600}, {"name": "corner_L_top", "px": 100, "py": -600}]
+    client.post("/api/match/8439241/calibration", json={"points": pts, "width": 3000, "height": 1000, "fit_distortion": False})
+    key = client.get("/api/match/8439241/shots").json()["attempts"][0]["key"]
+    r = client.get(f"/api/match/8439241/shots/{key}/propose", params={"t": 6.5})
+    assert r.status_code == 200
+    d = r.json()
+    g = next(x for x in d["players"] if x["guess"])
+    assert g["court"] == pytest.approx([4.0, 4.8], abs=0.05) and g["on"]
+    assert client.get("/api/match/8439241/shots/nokey/propose", params={"t": 6.5}).status_code == 200
+    (tr / "8439241.jsonl.gz").unlink()
+    assert client.get(f"/api/match/8439241/shots/{key}/propose", params={"t": 6.5}).status_code == 404

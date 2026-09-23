@@ -157,7 +157,7 @@
     <span class="muted" id="cf-help">Click to place · wheel = zoom · drag = pan · <span class="kbd">R</span> reset view · <span class="kbd">Esc</span> close · after Save, ±px shows how far each point is from the fitted model — red ones are probably mis-clicked or mislabelled</span>
     <span id="cf-info" class="muted"></span>
     <span style="flex:1"></span>
-    <span id="cf-locate-ctl" class="hidden"><button class="small" data-fr="-0.5">−0.5s</button><button class="small" data-fr="-0.1">−0.1s</button><button class="small" data-fr="0.1">+0.1s</button><button class="small" data-fr="0.5">+0.5s</button> <button class="small" id="cf-skip">Skip</button></span>
+    <span id="cf-locate-ctl" class="hidden"><button class="small" data-fr="-0.5">−0.5s</button><button class="small" data-fr="-0.1">−0.1s</button><button class="small" data-fr="0.1">+0.1s</button><button class="small" data-fr="0.5">+0.5s</button> <button class="small primary" id="cf-accept" title="Accept the highlighted tracked player as the shooter (Enter)">Accept guess ⏎</button> <button class="small" id="cf-skip">Skip</button></span>
     <button class="small" id="cf-reset">Reset view</button>
     <button class="small primary" id="cf-save">Save calibration</button>
     <button class="small" id="cf-close">Close</button>
@@ -331,7 +331,7 @@ let COURT = null, LM = null, calibPts = [], calibSrc = null;
 async function loadCourtMeta() { COURT = await api("court/landmarks"); LM = COURT.landmarks;
   $("lm-select").innerHTML = Object.keys(LM).map(k => `<option value="${k}">${k.replace(/_/g, " ")}</option>`).join(""); }
 // fullscreen calibrator: full-res frame on a canvas with zoom/pan
-const CF = { img: null, scale: 1, ox: 0, oy: 0, drag: null, mouse: null, fit: 1, outline: null, mode: "calib", t: 0, shot: null };
+const CF = { img: null, scale: 1, ox: 0, oy: 0, drag: null, mouse: null, fit: 1, outline: null, mode: "calib", t: 0, shot: null, prop: null };
 async function loadOutline() { try { CF.outline = S.data?.calibration?.H ? (await api(`match/${S.matchId}/calibration/outline`)).lines : null; } catch { CF.outline = null; } drawCalib(); }
 async function loadFrame(t) {
   const r = await fetch(`/api/match/${S.matchId}/frame?t=${t}&width=0`); if (!r.ok) throw new Error(await r.text());
@@ -345,11 +345,25 @@ async function openFrame(t, mode, shot) {
   const loc = mode === "locate";
   $("cf-title").textContent = loc ? `Locate shot: ${shot.label} · ${shot.playerNo != null && shot.playerNo !== "" ? "#" + shot.playerNo + " " : ""}${shot.playerName || playerName(shot.personId)} · Q${shot.period} ${shot.clockStr || fmtc(shot.clock)}` : "Court calibration";
   $("cf-lm-wrap").classList.toggle("hidden", loc); $("cf-save").classList.toggle("hidden", loc); $("cf-pts").classList.toggle("hidden", loc); $("cf-locate-ctl").classList.toggle("hidden", !loc);
-  $("cf-help").innerHTML = loc ? 'Click where the shooter\'s <b>feet</b> are at release · wheel = zoom · drag = pan · ±s buttons step the frame · <span class="kbd">Esc</span> close'
+  $("cf-help").innerHTML = loc ? 'Click where the shooter\'s <b>feet</b> are at release (tracked players are boxed: click a box to use its feet, <b>★</b> = likely shooter, <span class="kbd">Enter</span> accepts it) · wheel = zoom · drag = pan · ±s buttons step the frame · <span class="kbd">Esc</span> close'
     : 'Click to place · wheel = zoom · drag = pan · <span class="kbd">R</span> reset view · <span class="kbd">Esc</span> close · after Save, ±px shows how far each point is from the fitted model — red ones are probably mis-clicked or mislabelled';
   const wasHidden = $("calib-full").classList.contains("hidden");
   $("calib-full").classList.remove("hidden"); if (wasHidden) cfFit(); drawCalib(); loadOutline();
+  if (loc) loadProposal(shot, t);
 }
+// tracking-based proposal: tracked players drawn on the frame, likely shooter highlighted, frame moved to the release
+async function loadProposal(shot, t) {
+  CF.prop = null; $("cf-accept").classList.add("hidden");
+  let p; try { p = await api(`match/${S.matchId}/shots/${shot.key}/propose?t=${shot.video}`); } catch { drawCalib(); return; }   // 404 = no tracking data: plain manual mode
+  if (CF.shot?.key !== shot.key) return;
+  CF.prop = p;
+  if (p.release_t != null && Math.abs(p.release_t - CF.t) > 0.05 && !shot.located) { try { await loadFrame(p.release_t); P.seek(p.release_t); } catch {} }
+  $("cf-accept").classList.toggle("hidden", p.guess_id == null);
+  toast(p.guess_id != null ? `tracking: ${p.how} (#${p.guess_id}) — Enter accepts, or click another player / anywhere` : `tracking: ${p.how}`);
+  drawCalib();
+}
+function acceptGuess() { const g = CF.prop?.players.find(x => x.guess); if (!g) return toast("no tracked guess for this shot"); locateShotAt(CF.shot, g.foot[0], g.foot[1]); }
+$("cf-accept").onclick = acceptGuess;
 $("btn-frame").onclick = () => openFrame(P.time(), "calib");
 $("cf-locate-ctl").querySelectorAll("button[data-fr]").forEach(b => b.onclick = async () => { const t = Math.max(0, CF.t + +b.dataset.fr); P.seek(t); try { await loadFrame(t); } catch (e) { return toast(e.message); } drawCalib(); });
 $("cf-skip").onclick = () => { cfClose(); nextUnlocated(CF.shot?.key); };
@@ -370,12 +384,13 @@ window.addEventListener("resize", () => { if (!$("calib-full").classList.contain
   cv.addEventListener("mouseup", e => { const d = CF.drag; CF.drag = null; if (!d || d.moved || !calibSrc) return;
     const r = cv.getBoundingClientRect(); const [ix, iy] = cfToImg(e.clientX - r.left, e.clientY - r.top);
     if (ix < 0 || iy < 0 || ix > calibSrc.w || iy > calibSrc.h) return;
-    if (CF.mode === "locate") { locateShotAt(CF.shot, Math.round(ix * 10) / 10, Math.round(iy * 10) / 10); return; }
+    if (CF.mode === "locate") { const hitP = (CF.prop?.players || []).find(q => ix >= q.box[0] && ix <= q.box[2] && iy >= q.box[1] && iy <= q.box[3]);
+      if (hitP) locateShotAt(CF.shot, hitP.foot[0], hitP.foot[1]); else locateShotAt(CF.shot, Math.round(ix * 10) / 10, Math.round(iy * 10) / 10); return; }
     const name = $("lm-select").value; calibPts = calibPts.filter(p => p.name !== name); calibPts.push({ name, px: Math.round(ix * 10) / 10, py: Math.round(iy * 10) / 10 });
     const o = $("lm-select"); if (o.selectedIndex < o.options.length - 1) o.selectedIndex++; drawCalib(); });
   cv.addEventListener("mouseleave", () => { CF.drag = null; CF.mouse = null; drawCalib(); });
 }
-document.addEventListener("keydown", e => { if ($("calib-full").classList.contains("hidden")) return; if (e.key === "Escape") cfClose(); if (e.key.toLowerCase() === "r" && !e.target.matches("input,select")) { cfFit(); drawCalib(); } }, true);
+document.addEventListener("keydown", e => { if ($("calib-full").classList.contains("hidden")) return; if (e.key === "Escape") cfClose(); if (e.key === "Enter" && CF.mode === "locate") { e.preventDefault(); acceptGuess(); } if (e.key.toLowerCase() === "r" && !e.target.matches("input,select")) { cfFit(); drawCalib(); } }, true);
 function drawCalib() {
   const res = Object.fromEntries((S.data?.calibration?.residuals || []).map(r => [r.name, r]));
   const list = calibPts.map(p => { const r = res[p.name]; const bad = r && r.px_err > 25; return `<span class="a" style="${bad ? "border-color:var(--warn)" : ""}">${p.name} (${p.px},${p.py})${r ? ` <span class="${bad ? "" : "muted"}" style="${bad ? "color:var(--warn)" : ""}">±${r.px_err}px</span>` : ""} <button class="small" data-rm="${p.name}">×</button></span>`; }).join("") || '<span class="muted">no points yet</span>';
@@ -385,6 +400,15 @@ function drawCalib() {
   g.imageSmoothingEnabled = CF.scale < 2; g.drawImage(CF.img, CF.ox, CF.oy, CF.img.width * CF.scale, CF.img.height * CF.scale);
   if (CF.outline) { g.strokeStyle = "rgba(34,197,94,.75)"; g.lineWidth = 1.5; CF.outline.forEach(seg => { g.beginPath(); seg.forEach(([px, py], i) => { const X = CF.ox + px * CF.scale, Y = CF.oy + py * CF.scale; i ? g.lineTo(X, Y) : g.moveTo(X, Y); }); g.stroke(); }); }
   if (CF.mode === "locate") {
+    if (CF.prop) {
+      const T = (px, py) => [CF.ox + px * CF.scale, CF.oy + py * CF.scale];
+      if (CF.prop.ball.length > 1) { g.strokeStyle = "rgba(249,115,22,.8)"; g.lineWidth = 1.5; g.beginPath(); CF.prop.ball.forEach(([, bx, by], i) => { const [X, Y] = T(bx, by); i ? g.lineTo(X, Y) : g.moveTo(X, Y); }); g.stroke();
+        const last = CF.prop.ball.reduce((a, b) => Math.abs(b[0] - CF.t) < Math.abs(a[0] - CF.t) ? b : a); const [X, Y] = T(last[1], last[2]); g.fillStyle = "#f97316"; g.beginPath(); g.arc(X, Y, 5, 0, 7); g.fill(); }
+      for (const q of CF.prop.players) { const [x1, y1] = T(q.box[0], q.box[1]), [x2, y2] = T(q.box[2], q.box[3]); const [fx, fy] = T(q.foot[0], q.foot[1]);
+        g.strokeStyle = q.guess ? "#facc15" : "rgba(147,197,253,.75)"; g.lineWidth = q.guess ? 3 : 1; g.strokeRect(x1, y1, x2 - x1, y2 - y1);
+        g.fillStyle = q.guess ? "#facc15" : "rgba(147,197,253,.9)"; g.beginPath(); g.arc(fx, fy, q.guess ? 7 : 4, 0, 7); g.fill();
+        g.font = "12px sans-serif"; g.fillStyle = "#000"; g.fillRect(x1, y1 - 14, 14 + 7 * String(q.id).length, 14); g.fillStyle = q.guess ? "#facc15" : "#fff"; g.fillText((q.guess ? "★" : "") + q.id, x1 + 2, y1 - 3); }
+    }
     if (CF.shot?.px != null) { const X = CF.ox + CF.shot.px * CF.scale, Y = CF.oy + CF.shot.py * CF.scale; g.strokeStyle = CF.shot.made ? "#22c55e" : "#ef4444"; g.lineWidth = 2; g.beginPath(); g.arc(X, Y, 8, 0, 7); g.stroke(); g.beginPath(); g.moveTo(X - 12, Y); g.lineTo(X + 12, Y); g.moveTo(X, Y - 12); g.lineTo(X, Y + 12); g.stroke(); }
     if (CF.mouse) { const [mx, my] = CF.mouse; g.strokeStyle = "rgba(255,255,255,.5)"; g.lineWidth = 1; g.beginPath(); g.moveTo(mx, 0); g.lineTo(mx, cv.height); g.moveTo(0, my); g.lineTo(cv.width, my); g.stroke();
       const [ix, iy] = cfToImg(mx, my); $("cf-info").textContent = `frame ${fmt(CF.t)} · (${ix.toFixed(0)}, ${iy.toFixed(0)}) · zoom ${(CF.scale / CF.fit).toFixed(1)}×`; }

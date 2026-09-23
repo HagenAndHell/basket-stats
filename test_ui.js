@@ -197,6 +197,22 @@ const check = (name, cond, detail = "") => { console.log(`${cond ? "PASS" : "FAI
     // persisted server-side
     check("shot locations persisted in project", await getJSON(`${BASE}/api/match/8439241`).then(d => d.shots !== undefined));
 
+    // ---- tracking-assisted locate: tracked players boxed on the frame, click a box -> its foot point
+    // sync so that the first Q1 shot (0:54) lands inside the tracked window (25..40 s): video = -22 + clock
+    await ev("P.time = () => 100; document.getElementById('sync-clock').value='2:02'; document.getElementById('sync-period').value='1'; document.getElementById('btn-anchor').click()"); await sleep(800);
+    await ev("P.time = () => 30; document.getElementById('sync-clock').value='0:52'; document.getElementById('sync-period').value='1'; document.getElementById('btn-anchor').click()"); await sleep(800);
+    await waitFor(`SC.data && Math.abs(SC.data.attempts.find(a => a.key === '${firstKey}').video - 32) < 0.01`, 5000);
+    await ev(`locateShot('${firstKey}')`);
+    check("locate opens with tracking proposal", await waitFor("CF.mode === 'locate' && CF.prop && CF.prop.players.length > 0", 15000), await ev("JSON.stringify(CF.prop && CF.prop.how)"));
+    check("no ball in sample -> no guess, accept hidden", await ev("CF.prop.guess_id == null && document.getElementById('cf-accept').classList.contains('hidden')"));
+    check("tracked boxes drawn (blue pixels)", await ev("(()=>{drawCalib(); const c=document.getElementById('cf-canvas'); const d=c.getContext('2d').getImageData(0,0,c.width,c.height).data; let n=0; for(let i=0;i<d.length;i+=4) if(d[i+2]>200 && d[i]<180 && d[i+1]>150) n++; return n;})()") > 50);
+    const tp = await ev("CF.prop.players[0]");
+    await ev(`(()=>{const cv=document.getElementById('cf-canvas'); const r=cv.getBoundingClientRect(); cfFit(); const ix=(${tp.box[0]}+${tp.box[2]})/2, iy=(${tp.box[1]}+${tp.box[3]})/2; const x=r.left+CF.ox+ix*CF.scale, y=r.top+CF.oy+iy*CF.scale; cv.dispatchEvent(new MouseEvent('mousedown',{clientX:x, clientY:y, bubbles:true})); cv.dispatchEvent(new MouseEvent('mouseup',{clientX:x, clientY:y, bubbles:true}));})()`);
+    check("click inside a tracked box snaps to that player's feet", await waitFor(`(()=>{const a=SC.data.attempts.find(a => a.key === '${firstKey}'); return a.located && Math.abs(a.px - ${tp.foot[0]}) < 0.01 && Math.abs(a.py - ${tp.foot[1]}) < 0.01})()`, 5000), await ev(`JSON.stringify(SC.data.attempts.find(a => a.key === '${firstKey}'))`));
+    await ev("document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape', bubbles:true}))");
+    await ev(`api('match/'+S.matchId+'/shots/${firstKey}', {method:'DELETE'})`); await sleep(400);
+    await ev("document.querySelectorAll('#sync-list button').forEach(b=>b.click())"); await sleep(600);
+
     check("no uncaught JS errors", errors.length === 0, errors.join(" | "));
     console.log(failures ? `\n${failures} FAILED` : "\nALL PASSED");
   } finally { chrome.kill(); }
