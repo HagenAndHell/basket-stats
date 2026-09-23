@@ -161,7 +161,7 @@ def test_real_fisheye_calibration_from_user_points():
     pts = [{"name": a, "px": float(b), "py": float(c)} for a, b, c in (l.split() for l in USER_POINTS_4K.splitlines())]
     cal = court.calibrate(pts, 3840, 2160)
     assert cal["error_plain_m"] > 0.8            # plain homography is hopeless on this lens
-    assert cal["dist"] is not None and -0.9 < cal["dist"]["k1"] < -0.6   # strong barrel distortion, in the right basin
+    assert cal["dist"] is not None and -1.0 < cal["dist"]["k1"] < -0.45   # strong barrel distortion, in the right basin
     assert cal["error_m"] < 0.15
     assert max(r["px_err"] for r in cal["residuals"]) < 40
     # the near sideline drawn through the model passes near the clicked half_bottom

@@ -132,7 +132,9 @@ def _fit(src, dst, w, h, fit_distortion: bool):
         rr = rr_for(x[0], x[1])
         dg = 1 - k1 * rr ** 2 - 3 * k2 * rr ** 4
         den = 1 + k1 * rr ** 2 + k2 * rr ** 4
-        pen = (np.maximum(0.0, 0.15 - dg) + np.maximum(0.0, 0.15 - den)) * 50.0
+        # margin 0.05 (was 0.15): the looser margin lets k2 take the shape the fisheye actually has
+        # (rms 12 -> 9.6 cm on real 4K landmarks) while the bottom edge of the frame still maps sanely
+        pen = (np.maximum(0.0, 0.05 - dg) + np.maximum(0.0, 0.05 - den)) * 50.0
         return np.concatenate([(proj - dst_a).ravel(), pen])
 
     lo = [w * 0.25, h * 0.25, -3.0, -3.0 if fit_k2 else -1e-9]
